@@ -1,0 +1,38 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# next.js
+.next/
+.next-old*/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# production
+build/
+dist/
+
+# 本地数据：数据库、密钥、小说正文，绝不入库
+data/
+!data/.gitkeep
+
+# 回收站：删除的文件归档于此，属于本机数据，不入库
+public/.trash/
+
+# misc
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.local
+.env*.local
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# test
+coverage/

@@ -1,0 +1,851 @@
+@import 'tailwindcss';
+
+/*
+ * 设计基调：通透质感。底色是缓慢漂移的流体光斑，模块浮在其上，
+ * 以半透明玻璃面加细高光边框呈现，hover 时透出主题色辉光。
+ * 文字带柔和阴影，脱离背景以保证可读性。
+ * 主题色相由 --accent-hue 控制，设置页的滑块直接改写该变量。
+ */
+
+:root {
+  --accent-hue: 265;
+
+  --surface: #ffffff;
+  --surface-soft: #f4f5f7;
+  --surface-sunken: #eceef1;
+  --surface-raised: #ffffff;
+  --line: rgba(17, 17, 17, 0.1);
+  --line-strong: rgba(17, 17, 17, 0.2);
+  --text: #141416;
+  --text-muted: #5c5e66;
+  --text-faint: #8a8c93;
+  --accent: hsl(var(--accent-hue) 62% 46%);
+  --accent-strong: hsl(var(--accent-hue) 66% 38%);
+  --accent-soft: hsl(var(--accent-hue) 60% 96%);
+  --accent-border: hsl(var(--accent-hue) 55% 84%);
+  --danger: #b3261e;
+  --danger-soft: #fdecea;
+  --ok: #1f6f43;
+  --ok-soft: #e9f5ee;
+  --warn: #8a5a00;
+  --warn-soft: #fdf3e2;
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+
+  --shadow-soft: 0 1px 2px rgba(17, 17, 17, 0.04), 0 6px 20px rgba(17, 17, 17, 0.05);
+  --shadow-raised: 0 2px 6px rgba(17, 17, 17, 0.06), 0 18px 48px rgba(17, 17, 17, 0.1);
+
+  /*
+   * 玻璃面。半透明底加内侧一道细高光，模拟光照在玻璃上边缘的折射，
+   * 这是通透质感的关键，只靠透明度会显得发灰。
+   */
+  --glass-bg: rgba(255, 255, 255, 0.66);
+  --glass-bg-strong: rgba(255, 255, 255, 0.82);
+  --glass-bg-sunken: rgba(244, 245, 247, 0.58);
+  --glass-border: rgba(255, 255, 255, 0.68);
+  --glass-border-outer: rgba(17, 17, 17, 0.06);
+  --glass-blur: 18px;
+  --glass-saturate: 1.6;
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --glass-highlight-soft: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+
+  /* 主题色辉光。柔和用于常态，强辉光留给 hover 与强调态。 */
+  --glow-soft: 0 8px 28px -14px hsl(var(--accent-hue) 70% 42% / 0.3);
+  --glow-accent: 0 10px 34px -12px hsl(var(--accent-hue) 72% 46% / 0.45);
+  --glow-strong: 0 16px 46px -14px hsl(var(--accent-hue) 78% 48% / 0.6);
+  --glow-ring: 0 0 0 1px hsl(var(--accent-hue) 60% 60% / 0.32);
+
+  /* 文字阴影。浅色底上以亮色描边提亮，再叠一层极淡的暗色增加厚度。 */
+  --text-shadow-soft: 0 1px 1px rgba(255, 255, 255, 0.85), 0 0 10px rgba(255, 255, 255, 0.5);
+  --text-shadow-title: 0 1px 1px rgba(255, 255, 255, 0.9), 0 2px 14px hsl(var(--accent-hue) 60% 50% / 0.22);
+  --text-shadow-glow: 0 0 18px hsl(var(--accent-hue) 70% 55% / 0.35);
+
+  /* 流体背景光斑，色相跟随主题色，用低透明度避免压过内容。 */
+  --fluid-a: hsl(var(--accent-hue) 88% 72% / 0.55);
+  --fluid-b: hsl(calc(var(--accent-hue) + 58) 82% 74% / 0.45);
+  --fluid-c: hsl(calc(var(--accent-hue) - 62) 84% 76% / 0.42);
+  --fluid-d: hsl(calc(var(--accent-hue) + 150) 70% 78% / 0.34);
+  --fluid-base: #f7f8fa;
+  --fluid-veil: rgba(255, 255, 255, 0.42);
+
+  --density-space: 1;
+  --reader-font-size: 17px;
+  --reader-width: 46rem;
+
+  color-scheme: light;
+}
+
+/*
+ * 暗色主题。挂在 html 的 data-theme 上，取值 dark 时整体翻转为低亮度配色。
+ * 玻璃面改用深色半透明底，辉光在暗底上更明显，因此强度相应收敛。
+ */
+[data-theme='dark'] {
+  --surface: #17181b;
+  --surface-soft: #0f1012;
+  --surface-sunken: #22242a;
+  --surface-raised: #1c1d21;
+  --line: rgba(255, 255, 255, 0.1);
+  --line-strong: rgba(255, 255, 255, 0.22);
+  --text: #ececee;
+  --text-muted: #a3a5ab;
+  --text-faint: #7b7d84;
+  --accent: hsl(var(--accent-hue) 68% 68%);
+  --accent-strong: hsl(var(--accent-hue) 74% 78%);
+  --accent-soft: hsl(var(--accent-hue) 40% 20%);
+  --accent-border: hsl(var(--accent-hue) 42% 34%);
+  --danger: #f2887f;
+  --danger-soft: #3a2320;
+  --ok: #6fd39b;
+  --ok-soft: #17291f;
+  --warn: #e0b067;
+  --warn-soft: #2e2516;
+
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 20px rgba(0, 0, 0, 0.32);
+  --shadow-raised: 0 2px 6px rgba(0, 0, 0, 0.36), 0 18px 48px rgba(0, 0, 0, 0.46);
+
+  --glass-bg: rgba(28, 29, 34, 0.62);
+  --glass-bg-strong: rgba(32, 33, 39, 0.8);
+  --glass-bg-sunken: rgba(20, 21, 25, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --glass-border-outer: rgba(0, 0, 0, 0.4);
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+  --glass-highlight-soft: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  --glow-soft: 0 8px 28px -14px hsl(var(--accent-hue) 80% 60% / 0.4);
+  --glow-accent: 0 10px 34px -12px hsl(var(--accent-hue) 85% 62% / 0.55);
+  --glow-strong: 0 16px 46px -14px hsl(var(--accent-hue) 88% 64% / 0.7);
+  --glow-ring: 0 0 0 1px hsl(var(--accent-hue) 70% 70% / 0.4);
+
+  --text-shadow-soft: 0 1px 1px rgba(0, 0, 0, 0.5), 0 0 12px rgba(0, 0, 0, 0.35);
+  --text-shadow-title: 0 1px 2px rgba(0, 0, 0, 0.6), 0 2px 16px hsl(var(--accent-hue) 80% 60% / 0.3);
+  --text-shadow-glow: 0 0 20px hsl(var(--accent-hue) 85% 65% / 0.45);
+
+  --fluid-a: hsl(var(--accent-hue) 80% 42% / 0.5);
+  --fluid-b: hsl(calc(var(--accent-hue) + 58) 76% 44% / 0.4);
+  --fluid-c: hsl(calc(var(--accent-hue) - 62) 78% 46% / 0.38);
+  --fluid-d: hsl(calc(var(--accent-hue) + 150) 64% 48% / 0.3);
+  --fluid-base: #0b0c0e;
+  --fluid-veil: rgba(10, 11, 13, 0.42);
+
+  color-scheme: dark;
+}
+
+[data-density='compact'] {
+  --density-space: 0.82;
+}
+
+@theme inline {
+  --color-surface: var(--surface);
+  --color-surface-soft: var(--surface-soft);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-surface-raised: var(--surface-raised);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--text);
+  --color-ink-muted: var(--text-muted);
+  --color-ink-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-border: var(--accent-border);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+
+  --radius-card: var(--radius);
+  --radius-panel: var(--radius-lg);
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Source Han Sans SC',
+    'Noto Sans CJK SC', sans-serif;
+  --font-serif:
+    'Iowan Old Style', 'Songti SC', 'Source Han Serif SC', 'Noto Serif CJK SC', 'SimSun', serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;
+}
+
+* {
+  border-color: var(--line);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--fluid-base);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+/*
+ * 动态流体背景。
+ *
+ * 四枚大尺度模糊光斑在视口内缓慢漂移并缩放，色相全部跟随 --accent-hue，
+ * 因此换主题色时背景一并改变。整层固定且不接收指针事件，
+ * 内容层只需保证自身的层叠顺序在其之上。
+ *
+ * 用 CSS 而非画布实现：光斑数量固定，合成交给合成器，
+ * 不占用主线程，也不会随页面复杂度增长。
+ */
+.fluid-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--fluid-base);
+}
+
+.fluid-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(72px);
+  opacity: 0.85;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+}
+
+/* 主光斑，体量最大，负责整体色调 */
+.fluid-blob-a {
+  top: -18%;
+  left: -12%;
+  width: 62vw;
+  height: 62vw;
+  background: var(--fluid-a);
+  animation: fluid-drift-a 34s ease-in-out infinite alternate;
+}
+
+/* 副光斑，与主光斑错开相位，制造流动的交叠 */
+.fluid-blob-b {
+  top: -8%;
+  right: -16%;
+  width: 55vw;
+  height: 55vw;
+  background: var(--fluid-b);
+  animation: fluid-drift-b 42s ease-in-out infinite alternate;
+}
+
+.fluid-blob-c {
+  bottom: -22%;
+  left: 8%;
+  width: 58vw;
+  height: 58vw;
+  background: var(--fluid-c);
+  animation: fluid-drift-c 38s ease-in-out infinite alternate;
+}
+
+/* 冷色点缀，压住整体的暖调，避免单一 */
+.fluid-blob-d {
+  right: -6%;
+  bottom: -18%;
+  width: 46vw;
+  height: 46vw;
+  background: var(--fluid-d);
+  animation: fluid-drift-d 46s ease-in-out infinite alternate;
+}
+
+/*
+ * 覆盖层。光斑直接铺满视口会让文字对比度不稳，
+ * 这里盖一层与底色同调的薄雾，把色块压到刚好能看见的程度。
+ */
+.fluid-veil {
+  position: absolute;
+  inset: 0;
+  background: var(--fluid-veil);
+  backdrop-filter: blur(8px);
+}
+
+@keyframes fluid-drift-a {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(14vw, 10vh, 0) scale(1.18);
+  }
+}
+
+@keyframes fluid-drift-b {
+  from {
+    transform: translate3d(0, 0, 0) scale(1.1);
+  }
+  to {
+    transform: translate3d(-16vw, 14vh, 0) scale(0.94);
+  }
+}
+
+@keyframes fluid-drift-c {
+  from {
+    transform: translate3d(0, 0, 0) scale(0.96);
+  }
+  to {
+    transform: translate3d(12vw, -12vh, 0) scale(1.16);
+  }
+}
+
+@keyframes fluid-drift-d {
+  from {
+    transform: translate3d(0, 0, 0) scale(1.04);
+  }
+  to {
+    transform: translate3d(-10vw, -14vh, 0) scale(1.22);
+  }
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+/* 统一滚动条，保持平面化观感 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(17, 17, 17, 0.16);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(17, 17, 17, 0.3);
+  background-clip: content-box;
+}
+
+@utility text-soft {
+  text-shadow: var(--text-shadow-soft);
+}
+
+/* 组件基础类，保持全站一致的过渡与焦点样式 */
+@layer components {
+  /*
+   * 通用玻璃面。
+   *
+   * 三件套缺一不可：半透明底给出通透感，backdrop-filter 模糊身后的光斑，
+   * 内侧高光描边模拟玻璃边缘的折射。只做前两项会显得发灰发脏。
+   */
+  .glass {
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    border: 1px solid var(--glass-border);
+  }
+
+  .card {
+    position: relative;
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius);
+    box-shadow: var(--glass-highlight), var(--shadow-soft), var(--glow-soft);
+    transition:
+      box-shadow 260ms ease,
+      border-color 260ms ease,
+      transform 260ms ease,
+      background-color 260ms ease;
+  }
+
+  /* 顶边一道渐隐的亮线，是通透质感最容易被忽略的一笔 */
+  .card::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto;
+    height: 1px;
+    border-radius: var(--radius) var(--radius) 0 0;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.9),
+      transparent
+    );
+    opacity: 0.7;
+    pointer-events: none;
+  }
+  [data-theme='dark'] .card::before {
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent);
+  }
+
+  .card-hover:hover {
+    border-color: var(--glass-border);
+    background: var(--glass-bg-strong);
+    box-shadow: var(--glass-highlight), var(--shadow-raised), var(--glow-accent);
+    transform: translateY(-2px);
+  }
+
+  .btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--glass-border);
+    background: var(--glass-bg-strong);
+    backdrop-filter: blur(10px) saturate(1.4);
+    -webkit-backdrop-filter: blur(10px) saturate(1.4);
+    color: var(--text);
+    padding: 0.42rem 0.8rem;
+    font-size: 0.86rem;
+    font-weight: 500;
+    line-height: 1.4;
+    cursor: pointer;
+    text-shadow: var(--text-shadow-soft);
+    box-shadow: var(--glass-highlight-soft);
+    transition:
+      background-color 180ms ease,
+      border-color 180ms ease,
+      color 180ms ease,
+      box-shadow 200ms ease,
+      transform 180ms ease;
+  }
+  .btn:hover:not(:disabled) {
+    border-color: var(--accent-border);
+    background: var(--glass-bg-strong);
+    box-shadow: var(--glass-highlight-soft), var(--glow-soft);
+  }
+  .btn:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn:focus-visible {
+    outline: none;
+    box-shadow: var(--glow-ring), var(--glow-accent);
+  }
+
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+    border-color: transparent;
+    color: #ffffff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+    box-shadow: var(--glow-accent);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: linear-gradient(135deg, var(--accent-strong), var(--accent));
+    border-color: transparent;
+    box-shadow: var(--glow-strong);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: none;
+    color: var(--text-muted);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--glass-bg-strong);
+    border-color: var(--glass-border);
+    color: var(--text);
+  }
+
+  .btn-danger {
+    color: var(--danger);
+    border-color: var(--glass-border);
+    background: var(--glass-bg-strong);
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: var(--danger-soft);
+    border-color: var(--danger);
+    box-shadow: 0 8px 26px -14px var(--danger);
+  }
+
+  .input,
+  .textarea,
+  .select {
+    width: 100%;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--glass-border);
+    background: var(--glass-bg-sunken);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    color: var(--text);
+    padding: 0.45rem 0.65rem;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    box-shadow: var(--glass-highlight-soft);
+    transition:
+      border-color 180ms ease,
+      box-shadow 200ms ease,
+      background-color 180ms ease;
+  }
+  .input:hover,
+  .textarea:hover,
+  .select:hover {
+    border-color: var(--line-strong);
+  }
+  .input:focus,
+  .textarea:focus,
+  .select:focus {
+    outline: none;
+    border-color: var(--accent-border);
+    background: var(--glass-bg-strong);
+    box-shadow: var(--glass-highlight-soft), var(--glow-ring), var(--glow-soft);
+  }
+  .textarea {
+    resize: vertical;
+    min-height: 5rem;
+    font-family: inherit;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    border-radius: 999px;
+    border: 1px solid var(--glass-border);
+    background: var(--glass-bg-sunken);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    padding: 0.1rem 0.55rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-shadow: var(--text-shadow-soft);
+    transition:
+      background-color 180ms ease,
+      color 180ms ease,
+      border-color 180ms ease,
+      box-shadow 200ms ease;
+  }
+  .chip-accent {
+    background: var(--accent-soft);
+    border-color: var(--accent-border);
+    color: var(--accent-strong);
+    box-shadow: var(--glow-soft);
+  }
+
+  .panel-title {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    text-shadow: var(--text-shadow-soft);
+  }
+
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    border-radius: var(--radius-sm);
+    padding: 0.44rem 0.6rem;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+    text-shadow: var(--text-shadow-soft);
+    transition:
+      background-color 180ms ease,
+      color 180ms ease,
+      box-shadow 200ms ease,
+      transform 180ms ease;
+  }
+  .nav-item:hover {
+    background: var(--glass-bg-strong);
+    color: var(--text);
+    box-shadow: var(--glass-highlight-soft), var(--glow-soft);
+  }
+  .nav-item-active {
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    font-weight: 600;
+    box-shadow: var(--glow-soft);
+  }
+
+  /* 标题与强调文字共用一套辉光，避免各处各写一份 */
+  .text-glow {
+    text-shadow: var(--text-shadow-title);
+  }
+  .text-glow-strong {
+    text-shadow: var(--text-shadow-title), var(--text-shadow-glow);
+  }
+
+  /*
+   * 自定义下拉菜单。
+   *
+   * 原生 select 的展开列表由系统绘制，无法参与这套视觉，
+   * 因此改写为按钮加浮层的组合，浮层沿用同一套玻璃与辉光。
+   */
+  .dropdown-panel {
+    background: var(--glass-bg-strong);
+    backdrop-filter: blur(calc(var(--glass-blur) + 6px)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: blur(calc(var(--glass-blur) + 6px)) saturate(var(--glass-saturate));
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius);
+    box-shadow: var(--glass-highlight), var(--shadow-raised), var(--glow-accent);
+    overflow: hidden;
+  }
+
+  .dropdown-item {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    border-radius: var(--radius-sm);
+    padding: 0.4rem 0.55rem;
+    text-align: left;
+    font-size: 0.86rem;
+    color: var(--text-muted);
+    text-shadow: var(--text-shadow-soft);
+    transition:
+      background-color 160ms ease,
+      color 160ms ease,
+      box-shadow 180ms ease;
+  }
+  .dropdown-item:hover,
+  .dropdown-item[data-focus='true'] {
+    background: var(--glass-bg-sunken);
+    color: var(--text);
+  }
+  .dropdown-item[data-selected='true'] {
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    font-weight: 600;
+    box-shadow: var(--glow-soft);
+  }
+
+  /* 焦点环统一走主题色辉光，保证键盘操作时可见 */
+  .focus-glow:focus-visible {
+    outline: none;
+    border-color: var(--accent-border);
+    box-shadow: var(--glow-ring), var(--glow-accent);
+  }
+}
+
+
+/* 正文排版，供 Markdown 渲染使用 */
+.prose-novel {
+  font-family: var(--font-serif);
+  font-size: var(--reader-font-size);
+  line-height: 2;
+  color: var(--text);
+  text-shadow: var(--text-shadow-soft);
+}
+
+/*
+ * 角色发言行。色相由 --talk-hue 传入，明度与饱和度随明暗主题变化，
+ * 保证同一角色在任何主题下颜色一致且始终可读。
+ *
+ * 角色名前缀由 ::before 生成，因此选中复制时只会得到纯对白；
+ * 需要隐藏时在容器上加 talk-names-hidden 即可整体关掉。
+ */
+.talk-line {
+  --talk-hue: 265;
+  --talk-name-opacity: 0.72;
+  color: hsl(var(--talk-hue) 58% 42%);
+  font-weight: 500;
+}
+[data-theme='dark'] .talk-line {
+  color: hsl(var(--talk-hue) 62% 72%);
+}
+
+.talk-line::before {
+  content: attr(data-chara) '：';
+  margin-right: 0.08em;
+  font-size: 0.9em;
+  font-weight: 600;
+  opacity: var(--talk-name-opacity);
+}
+
+.talk-names-hidden .talk-line::before {
+  content: none;
+}
+
+/* 正文标题与引用内的发言不重复显示角色名，避免与上下文重复 */
+.prose-novel blockquote .talk-line::before {
+  content: none;
+}
+
+.prose-novel p {
+  margin: 0 0 1.05em;
+  text-indent: 2em;
+}
+.prose-novel h1,
+.prose-novel h2,
+.prose-novel h3 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  margin: 1.6em 0 0.7em;
+  text-indent: 0;
+  text-shadow: var(--text-shadow-title);
+}
+.prose-novel h1 {
+  font-size: 1.5em;
+}
+.prose-novel h2 {
+  font-size: 1.28em;
+}
+.prose-novel h3 {
+  font-size: 1.12em;
+}
+.prose-novel blockquote {
+  margin: 1.2em 0;
+  padding-left: 1em;
+  border-left: 3px solid var(--accent-border);
+  color: var(--text-muted);
+  text-indent: 0;
+}
+.prose-novel ul,
+.prose-novel ol {
+  margin: 1em 0 1.2em;
+  padding-left: 1.6em;
+}
+.prose-novel li {
+  text-indent: 0;
+}
+.prose-novel strong {
+  font-weight: 600;
+}
+.prose-novel em {
+  font-style: italic;
+}
+.prose-novel hr {
+  margin: 2em auto;
+  width: 40%;
+  border: none;
+  border-top: 1px solid var(--line);
+}
+.prose-novel code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--surface-sunken);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
+/* 淡入动画，用于面板与列表项 */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-rise {
+  animation: rise-in 260ms ease both;
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 1.6s ease-in-out infinite;
+}
+
+/*
+ * 沉浸式阅读。
+ *
+ * 整层覆盖视口，只留正文与一条轻量工具条。
+ * 正文宽度与字号沿用阅读设置，因此进入沉浸模式时排版不会跳变。
+ */
+.immersive-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: var(--fluid-base);
+  animation: immersive-in 300ms ease both;
+}
+
+@keyframes immersive-in {
+  from {
+    opacity: 0;
+    transform: scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* 背景光斑在沉浸模式下压暗，让视线集中在正文上 */
+.immersive-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    120% 80% at 50% 0%,
+    hsl(var(--accent-hue) 60% 60% / 0.12),
+    transparent 70%
+  );
+  pointer-events: none;
+}
+
+.immersive-bar {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  padding: 0.5rem 1rem;
+}
+
+.immersive-body {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2.5rem 1.25rem 6rem;
+}
+
+.immersive-page {
+  margin: 0 auto;
+  max-width: var(--reader-width);
+  border-radius: var(--radius-lg);
+  padding: 2.5rem 2.75rem;
+}
+
+.immersive-page .prose-novel {
+  font-size: var(--reader-font-size);
+}
+
+/* 沉浸模式下滑杆走主题色，与控制条整体观感一致 */
+.immersive-bar input[type='range'] {
+  accent-color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
