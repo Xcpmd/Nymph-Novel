@@ -45,12 +45,21 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
   const [tagFilter, setTagFilter] = useState('');
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<ChapterWithVolume | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<ChapterWithVolume | null>(null);
+  /** 待设为废案的章节。目录里的删除一律先走废案，不直接抹除。 */
+  const [pendingScrap, setPendingScrap] = useState<ChapterWithVolume | null>(null);
   const [pendingVolumeDelete, setPendingVolumeDelete] = useState<Volume | null>(null);
   const [newVolumeOpen, setNewVolumeOpen] = useState(false);
+  /** 废案章节。不参与目录的卷章分组，单独成区展示。 */
+  const [scrapped, setScrapped] = useState<ChapterWithVolume[]>([]);
+  /** 废案区是否展开 */
+  const [scrapOpen, setScrapOpen] = useState(false);
+  /** 待彻底删除的废案 */
+  const [pendingPurge, setPendingPurge] = useState<ChapterWithVolume | null>(null);
 
   const [form, setForm] = useState({
     title: '',
+    /** 章节序号用整数输入，避免让用户手写「第一章」这类汉字标题 */
+    index: '',
     volumeId: '',
     direction: '',
     eventId: '',
@@ -65,14 +74,24 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [chapterResult, volumeResult, tagResult, preferenceResult, eventResult] = await Promise.all([
+      const [
+        chapterResult,
+        scrapResult,
+        volumeResult,
+        tagResult,
+        preferenceResult,
+        eventResult,
+      ] = await Promise.all([
         api.get<ChapterWithVolume[]>(novelResourcePath(novelId, 'chapters')),
+        // 废案单独取，它们不参与目录分组
+        api.get<ChapterWithVolume[]>(`${novelResourcePath(novelId, 'chapters')}?scope=scrapped`),
         api.get<Volume[]>(novelResourcePath(novelId, 'volumes')),
         api.get<Tag[]>(novelResourcePath(novelId, 'tags')),
         api.get<{ preferences: NovelPreferences }>(novelResourcePath(novelId, 'preferences')),
         api.get<StoryEventListPayload>(novelResourcePath(novelId, 'story-events')),
       ]);
       setChapters(chapterResult);
+      setScrapped(scrapResult);
       setVolumes(volumeResult);
       setTags(tagResult);
       setPreferences(preferenceResult.preferences);
@@ -104,7 +123,9 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
 
   const openCreate = () => {
     setForm({
-      title: `第${chapters.length + 1}章`,
+      // 标题留空由提交时按序号补，序号预填为下一个可用位置
+      title: '',
+      index: String(chapters.length + 1),
       volumeId: volumes[volumes.length - 1]?.id ?? '',
       direction: '',
       eventId: '',
@@ -120,6 +141,7 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
   const openEdit = (chapter: ChapterWithVolume) => {
     setForm({
       title: chapter.title,
+      index: String(chapter.indexNo),
       volumeId: chapter.volumeId,
       direction: chapter.direction,
       eventId: chapter.eventId ?? '',
@@ -133,14 +155,17 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
   };
 
   const submitCreate = async () => {
-    if (!form.title.trim()) {
-      toast.error(t('common.required'));
+    const index = form.index.trim() ? Number(form.index) : undefined;
+    if (index !== undefined && (!Number.isInteger(index) || index < 1)) {
+      toast.error(t('chapters.indexInvalid'));
       return;
     }
+    // 标题留空时按序号自动命名，用户不必手写「第一章」这类汉字
+    const title = form.title.trim() || (index ? `第${index}章` : t('chapters.untitled'));
     try {
       const result = await api.post<{ chapter: ChapterWithVolume }>(
         novelResourcePath(novelId, 'chapters'),
-        { title: form.title, volumeId: form.volumeId, direction: form.direction },
+        { title, index, volumeId: form.volumeId, direction: form.direction },
       );
       if (form.tags.length > 0) {
         await api.patch(novelResourcePath(novelId, 'tags', result.chapter.id), { tags: form.tags });
@@ -158,6 +183,8 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
     try {
       await api.patch(novelResourcePath(novelId, 'chapters', editing.id), {
         title: form.title,
+        // 序号改动会触发同卷重排，留空表示不动
+        indexNo: form.index.trim() ? Number(form.index) : undefined,
         status: form.status,
         eventId: form.eventId || null,
         stepIndex: form.stepIndex,
@@ -173,11 +200,46 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
     }
   };
 
-  const removeChapter = async () => {
-    if (!pendingDelete) return;
+  /**
+   * 把章节设为废案。
+   *
+   * 记录与正文都保留，只是移出正常目录，因此不需要二次确认；
+   * 真正不可逆的是废案区里的彻底删除，那一步才弹确认框。
+   */
+  const scrapChapter = async (chapter: ChapterWithVolume) => {
     try {
-      await api.delete(novelResourcePath(novelId, 'chapters', pendingDelete.id));
-      setPendingDelete(null);
+      await api.patch(novelResourcePath(novelId, 'chapters', chapter.id), { action: 'scrap' });
+      toast.success(t('chapters.scrapDone'));
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+    }
+  };
+
+  /** 还原废案。原位置被占用时服务端会拒绝并说明是哪一章占着。 */
+  const restoreScrapped = async (chapter: ChapterWithVolume) => {
+    try {
+      await api.patch(novelResourcePath(novelId, 'chapters', chapter.id), { action: 'restore' });
+      toast.success(t('chapters.restoreDone'));
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+    }
+  };
+
+  /** 确认设为废案。废案可在下方废案区还原或彻底删除。 */
+  const confirmScrap = async () => {
+    if (!pendingScrap) return;
+    await scrapChapter(pendingScrap);
+    setPendingScrap(null);
+  };
+
+  /** 彻底删除废案，连同正文文件。 */
+  const purgeScrapped = async () => {
+    if (!pendingPurge) return;
+    try {
+      await api.delete(novelResourcePath(novelId, 'chapters', pendingPurge.id));
+      setPendingPurge(null);
       toast.success(t('common.saved'));
       await load();
     } catch (error) {
@@ -381,10 +443,11 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
                           <button
                             type="button"
                             className="btn btn-danger px-2 py-1 text-xs"
-                            onClick={() => setPendingDelete(chapter)}
-                            aria-label={t('common.delete')}
+                            onClick={() => setPendingScrap(chapter)}
+                            aria-label={t('chapters.scrapChapter')}
+                            title={t('chapters.scrapChapter')}
                           >
-                            <i className="fa-solid fa-trash-can" aria-hidden />
+                            <i className="fa-solid fa-box-archive" aria-hidden />
                           </button>
                         </div>
                       </li>
@@ -396,6 +459,54 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
           ))}
         </div>
       )}
+
+      {/*
+        废案区。这里的章节已经让出序号，不参与上面的卷章分组，
+        可以在此还原回原位置，或彻底删除。
+      */}
+      <Panel
+        title={t('chapters.scrappedSection')}
+        description={t('chapters.scrappedHint')}
+        actions={
+          <Button size="sm" onClick={() => setScrapOpen((value) => !value)}>
+            <i className={scrapOpen ? 'fa-solid fa-chevron-up' : 'fa-solid fa-chevron-down'} aria-hidden />
+            {scrapped.length}
+          </Button>
+        }
+      >
+        {scrapOpen ? (
+          scrapped.length === 0 ? (
+            <p className="text-xs text-ink-faint">{t('chapters.noScrapped')}</p>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {scrapped.map((chapter) => (
+                <li
+                  key={chapter.id}
+                  className="flex flex-wrap items-center gap-2 rounded-[6px] border border-line px-3 py-2"
+                >
+                  <i className="fa-solid fa-box-archive text-[0.72rem] text-ink-faint" aria-hidden />
+                  <span className="min-w-0 flex-1 truncate text-[0.86rem]">{chapter.title}</span>
+                  <span className="chip">
+                    {chapter.wordCount.toLocaleString('zh-Hans-CN')} {t('common.words')}
+                  </span>
+                  <Button size="sm" onClick={() => void restoreScrapped(chapter)}>
+                    <i className="fa-solid fa-rotate-left" aria-hidden />
+                    {t('chapters.restore')}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    onClick={() => setPendingPurge(chapter)}
+                    aria-label={t('common.delete')}
+                  >
+                    <i className="fa-solid fa-trash-can" aria-hidden />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )
+        ) : null}
+      </Panel>
 
       <Modal
         open={creating}
@@ -411,12 +522,25 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
         }
       >
         <div className="grid gap-3.5">
-          <Field label={t('chapters.chapterTitle')} required>
-            <TextInput
-              value={form.title}
-              onChange={(event) => setForm({ ...form, title: event.target.value })}
-            />
-          </Field>
+          <div className="grid gap-3.5 sm:grid-cols-2">
+            <Field label={t('chapters.chapterIndex')} hint={t('chapters.chapterIndexHint')}>
+              <TextInput
+                type="number"
+                min={1}
+                step={1}
+                value={form.index}
+                placeholder={t('chapters.chapterIndexPlaceholder')}
+                onChange={(event) => setForm({ ...form, index: event.target.value })}
+              />
+            </Field>
+            <Field label={t('chapters.chapterTitle')}>
+              <TextInput
+                value={form.title}
+                placeholder={t('chapters.titleAutoHint')}
+                onChange={(event) => setForm({ ...form, title: event.target.value })}
+              />
+            </Field>
+          </div>
           <Field label={t('nav.chapters')}>
             <Select
               value={form.volumeId}
@@ -568,12 +692,20 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
       </Modal>
 
       <ConfirmDialog
-        open={pendingDelete !== null}
-        title={t('common.delete')}
-        message={t('chapters.deleteChapterConfirm')}
+        open={pendingScrap !== null}
+        title={t('chapters.scrapChapter')}
+        message={t('chapters.scrapConfirm')}
         danger
-        onCancel={() => setPendingDelete(null)}
-        onConfirm={removeChapter}
+        onCancel={() => setPendingScrap(null)}
+        onConfirm={confirmScrap}
+      />
+      <ConfirmDialog
+        open={pendingPurge !== null}
+        title={t('common.delete')}
+        message={t('chapters.purgeConfirm')}
+        danger
+        onCancel={() => setPendingPurge(null)}
+        onConfirm={purgeScrapped}
       />
       <ConfirmDialog
         open={pendingVolumeDelete !== null}

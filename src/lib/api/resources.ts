@@ -17,9 +17,12 @@ import {
   getNovel,
   listChapters,
   listVolumes,
+  moveChapterToIndex,
   rebuildNovelIndex,
   refreshNovelStats,
+  restoreChapter,
   saveChapterContent,
+  scrapChapter,
   searchChapters,
   updateChapter,
   updateVolume,
@@ -27,6 +30,7 @@ import {
 import {
   advanceStoryEvent,
   approveRecallRequest,
+  activateEncyclopediaVersion,
   createBranch,
   createCharacter,
   createEncyclopediaEntry,
@@ -51,10 +55,12 @@ import {
   getMainBranch,
   getOutlineTree,
   getStoryEvent,
+  getEncyclopediaVersion,
   listBranches,
   listCharacters,
   listEncyclopedia,
   listEncyclopediaQueries,
+  listEncyclopediaVersions,
   listFinishedStoryEvents,
   listRecallRequests,
   listRelations,
@@ -88,6 +94,8 @@ import {
   listUsageLogs,
   setChapterTags,
   summarizeUsage,
+  getRun,
+  listRuns,
 } from '../repo/library';
 import { getNovelDiskUsage } from '../store/chapter-files';
 import { isSetupFileKey, writeSetupFile } from '../store/setup-files';
@@ -150,6 +158,8 @@ const OUTLINE_KINDS: OutlineKind[] = ['arc', 'beat', 'sub'];
 const OUTLINE_STATUS: OutlineStatus[] = ['planned', 'active', 'done'];
 const EVENT_KINDS = ['plot', 'background', 'fork', 'merge'] as const;
 const STORY_EVENT_STATUS: StoryEventStatus[] = ['active', 'writing', 'done', 'archived'];
+/** 百科版本来源。ai 表示由模型抽取生成 */
+const ENCYCLOPEDIA_ORIGINS = ['ai', 'manual'] as const;
 
 function requireNovel(novelId: string): void {
   if (!getNovel(novelId)) throw new Error('小说不存在');
@@ -198,7 +208,9 @@ export const RESOURCES: Record<string, ResourceDefinition> = {
     label: '章',
     list: ({ novelId, url }) => {
       const volumeId = queryString(url, 'volumeId');
-      const chapters = listChapters(novelId, { volumeId });
+      // scope=scrapped 时只列废案，供目录里的废案区使用
+      const onlyScrapped = queryString(url, 'scope') === 'scrapped';
+      const chapters = listChapters(novelId, { volumeId, onlyScrapped });
       const tagMap = new Map(chapters.map((chapter) => [chapter.id, getChapterTags(chapter.id)]));
       return chapters.map((chapter) => ({ ...chapter, tags: tagMap.get(chapter.id) ?? [] }));
     },
@@ -215,7 +227,32 @@ export const RESOURCES: Record<string, ResourceDefinition> = {
       return { chapter, chapters: listChapters(novelId) };
     },
     getItem: ({ itemId }) => getChapterContent(itemId),
-    updateItem: ({ itemId, body }) => {
+    updateItem: ({ itemId, body, novelId }) => {
+      /*
+       * 废案与还原走独立动作。
+       *
+       * 它们会连带改动序号与正文位置，不适合通过普通字段更新触发，
+       * 放在这里显式分流，也便于把失败原因原样带回界面。
+       */
+      const action = asString(body.action);
+      if (action === 'scrap') {
+        const chapter = scrapChapter(itemId);
+        if (!chapter) throw new Error('章节不存在');
+        return { chapter, chapters: listChapters(novelId) };
+      }
+      if (action === 'restore') {
+        const result = restoreChapter(itemId);
+        if (!result.ok) {
+          if (result.reason === 'occupied') {
+            throw new Error(
+              `原位置已被《${result.occupiedTitle ?? '其他章节'}》占用，请先把它设为废案再还原`,
+            );
+          }
+          throw new Error(result.reason === 'notScrapped' ? '该章节不是废案' : '章节不存在');
+        }
+        return { chapter: result.chapter, chapters: listChapters(novelId) };
+      }
+
       // 正文与元数据分开处理，避免一次请求同时覆盖两者
       if (body.content !== undefined) {
         const content = asString(body.content) ?? '';
@@ -227,7 +264,7 @@ export const RESOURCES: Record<string, ResourceDefinition> = {
         }
         return { chapter: getChapter(itemId), wordCount: chapter?.wordCount ?? 0 };
       }
-      return updateChapter(itemId, {
+      const updated = updateChapter(itemId, {
         title: asString(body.title),
         status: asEnum(body.status, ['planned', 'drafting', 'generated', 'revised'] as const),
         eventId: body.eventId === null ? null : asString(body.eventId),
@@ -237,6 +274,14 @@ export const RESOURCES: Record<string, ResourceDefinition> = {
         direction: asString(body.direction),
         notes: asString(body.notes),
       });
+
+      // 序号改动会牵动同卷其他章节，走专用路径重排并同步文件
+      const indexNo = asInt(body.indexNo, 1);
+      if (indexNo !== undefined) {
+        const moved = moveChapterToIndex(itemId, indexNo);
+        return { chapter: moved ?? updated, chapters: listChapters(novelId) };
+      }
+      return { chapter: updated, chapters: listChapters(novelId) };
     },
     deleteItem: ({ itemId, novelId }) => {
       deleteChapter(itemId);
@@ -386,6 +431,20 @@ export const RESOURCES: Record<string, ResourceDefinition> = {
     },
   },
 
+  /*
+   * 生成请求日志。
+   *
+   * 每次调用模型都会留下一条记录，含实际发出的消息全文、模型输出、
+   * 用量与失败原因，供界面右下角的日志面板查看。
+   */
+  'generation-runs': {
+    label: '请求日志',
+    list: ({ novelId, url }) => ({
+      runs: listRuns(novelId, asInt(queryString(url, 'limit'), 1, 200) ?? 40),
+    }),
+    getItem: ({ itemId }) => getRun(itemId),
+  },
+
   /* -------------------------------------------------------- 百科全书 */
   encyclopedia: {
     label: '百科条目',
@@ -402,6 +461,9 @@ export const RESOURCES: Record<string, ResourceDefinition> = {
         content: asString(body.content),
         tags: asStringArray(body.tags),
         sourceChapterId: asString(body.sourceChapterId) || null,
+        // 同名条目已存在时会追加一个版本而不是重复建条目，
+        // origin 用于区分这一版是模型抽取还是用户填写
+        origin: asEnum(body.origin, ENCYCLOPEDIA_ORIGINS),
       }),
     getItem: ({ itemId }) => getEncyclopediaEntry(itemId),
     updateItem: ({ itemId, body }) =>
@@ -417,6 +479,31 @@ export const RESOURCES: Record<string, ResourceDefinition> = {
     deleteItem: ({ itemId }) => {
       deleteEncyclopediaEntry(itemId);
       return { ok: true };
+    },
+  },
+
+  /*
+   * 百科条目版本。
+   *
+   * 同一条目下的多份正文共用条目身份，界面在这里列出历史版本，
+   * 并把某一版设为启用。只有启用版本会进入给模型的上下文。
+   */
+  'encyclopedia-versions': {
+    label: '百科条目版本',
+    list: ({ url }) => {
+      const entryId = queryString(url, 'entryId');
+      if (!entryId) return { versions: [] };
+      return { versions: listEncyclopediaVersions(entryId) };
+    },
+    getItem: ({ itemId }) => getEncyclopediaVersion(itemId),
+    updateItem: ({ itemId, body }) => {
+      // 启用某一版，同条目其余版本自动停用
+      if (body.action === 'activate' || body.isActive === true) {
+        const entry = activateEncyclopediaVersion(itemId);
+        if (!entry) throw new Error('版本不存在');
+        return { entry };
+      }
+      throw new Error('仅支持把某个版本设为启用');
     },
   },
 
@@ -626,6 +713,43 @@ export const RESOURCES: Record<string, ResourceDefinition> = {
     },
     getItem: ({ itemId }) => getStoryEvent(itemId),
     updateItem: ({ itemId, body, novelId }) => {
+      /*
+       * 按大纲拆分章节。
+       *
+       * 事件大纲的每个推进步骤对应一章，这里一次性把它们建成章节目录，
+       * 免去逐条新建。已经建过的步骤跳过，重复点击不会产生重复章节。
+       */
+      if (asString(body.action) === 'splitChapters') {
+        const event = getStoryEvent(itemId);
+        if (!event) throw new Error('事件不存在');
+        if (event.steps.length === 0) {
+          throw new Error('该事件还没有推进步骤，无法拆分章节');
+        }
+
+        const taken = new Set(
+          listChapters(novelId)
+            .filter((chapter) => chapter.eventId === itemId)
+            .map((chapter) => chapter.stepIndex ?? -1),
+        );
+        const volumes = listVolumes(novelId);
+        const volumeId = volumes[volumes.length - 1]?.id;
+
+        let created = 0;
+        event.steps.forEach((step, index) => {
+          if (taken.has(index)) return;
+          createChapter(novelId, {
+            title: step.title || `第${index + 1}章`,
+            volumeId,
+            eventId: itemId,
+            stepIndex: index,
+            direction: event.userChoice || '',
+          });
+          created += 1;
+        });
+
+        return { event, created, chapters: listChapters(novelId) };
+      }
+
       // advance 字段表示按步推进，用于章节生成后的进度前移
       if (body.advance !== undefined) {
         const stepsForward = asInt(body.advance) ?? 1;

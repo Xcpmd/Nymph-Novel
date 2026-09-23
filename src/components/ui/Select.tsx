@@ -194,7 +194,7 @@ export function Select({
         <div
           id={listId}
           role="listbox"
-          className="dropdown-panel animate-rise absolute top-[calc(100%+0.35rem)] right-0 left-0 z-50 max-h-64 overflow-y-auto p-1.5"
+          className="dropdown-panel animate-rise absolute top-[calc(100%+0.35rem)] left-0 z-50 max-h-64 min-w-full overflow-y-auto p-1.5"
         >
           {options.map((item, index) => (
             <button

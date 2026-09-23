@@ -36,6 +36,7 @@ import {
   parseStepStatus,
   stripStepBlocks,
 } from '@/lib/ai/prompts';
+import { deriveStepsFromOutline } from '@/lib/markdown/outline';
 import {
   advanceStoryEvent,
   createCharacter,
@@ -68,6 +69,8 @@ const generateSchema = z.object({
     'direction',
     'outline',
     'outline_revise',
+    'outline_overview_revise',
+    'outline_node_write',
     'chapter',
     'chapter_revise',
     'character_extract',
@@ -97,6 +100,13 @@ const generateSchema = z.object({
   /** 中断后继续生成时携带的已完成内容 */
   resumeFrom: z.string().optional().nullable(),
   resumeRunId: z.string().optional().nullable(),
+  /**
+   * 上下文超出预算时，用户已确认保留全文继续发送。
+   *
+   * 未确认时遇到超预算不会裁剪，而是在流里发一条询问事件，
+   * 由界面给出二次确认按钮。
+   */
+  confirmOverBudget: z.boolean().optional(),
   maxTokens: z.number().int().positive().optional(),
 });
 
@@ -168,13 +178,46 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   // 组装上下文
+  //
+  // 默认按预算裁剪各层。用户已经确认过保留全文时不再裁剪，
+  // 未确认而出现超预算，则返回询问事件而不是悄悄裁掉内容。
+  const overBudgetConfirmed = parsed.confirmOverBudget === true;
   const bundle = buildContext(parsed.novelId, {
     chapterId: parsed.chapterId ?? undefined,
     direction: parsed.direction ?? undefined,
     instruction: parsed.instruction ?? undefined,
     eventId: currentEvent?.id,
     pinnedChapterIds: Array.from(recalledChapterIds),
+    allowTrim: !overBudgetConfirmed,
   });
+
+  if (!overBudgetConfirmed && bundle.trimmed) {
+    const encoder = new TextEncoder();
+    const trimmedLayers = bundle.layers
+      .filter((layer) => layer.trimmed)
+      .map((layer) => ({ key: layer.key, label: layer.label, tokens: layer.tokens }));
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            sseEvent('budget-exceeded', {
+              totalTokens: bundle.layers.reduce((sum, layer) => sum + layer.tokens, 0),
+              budget: bundle.budget,
+              layers: trimmedLayers,
+            }),
+          ),
+        );
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+      },
+    });
+  }
 
   const vars: Record<string, string> = {
     ...bundle.vars,
@@ -183,7 +226,15 @@ export async function POST(request: Request): Promise<Response> {
     chapterTitle: chapter?.title ?? '',
     optionCount: String(parsed.optionCount ?? 3),
     existingContent: parsed.existingContent ?? '',
-    instruction: [parsed.instruction ?? '', parsed.direction ?? ''].filter(Boolean).join('\n'),
+    /*
+     * 方向与额外要求各自独立成变量。
+     *
+     * 早先把 direction 拼进 instruction 代偿，模板里的 {{direction}} 一直是空的，
+     * 结果是用户手写的方向只出现在「用户补充要求」下，
+     * 「已确认的故事方向」那一栏始终空白，模型看不到被明确指认的方向。
+     */
+    direction: parsed.direction ?? '',
+    instruction: parsed.instruction ?? '',
     revisionMode: parsed.revisionMode ?? '按指令修改',
     currentEventOutline: parsed.existingContent?.trim() || bundle.vars.currentEventOutline || '',
   };
@@ -212,6 +263,10 @@ export async function POST(request: Request): Promise<Response> {
     providerId: provider.id,
     model: parsed.model || provider.defaultModel,
     request: { taskType, instruction: parsed.instruction },
+    // 日志里要能对照实际发出去的上下文，这里把消息拼成可读文本存下来
+    promptText: composed.messages
+      .map((message) => `【${message.role}】\n${message.content}`)
+      .join('\n\n----------\n\n'),
   });
 
   const encoder = new TextEncoder();
@@ -336,7 +391,12 @@ export async function POST(request: Request): Promise<Response> {
         durationMs,
       });
       send('usage', { ...usage, durationMs, estimated: usage.estimated });
-      updateRun(runId, { status: failed ? 'failed' : 'done', partialText: accumulated });
+      updateRun(runId, {
+        status: failed ? 'failed' : 'done',
+        partialText: accumulated,
+        // 用量一并落库，请求日志里才能看到本次消耗
+        usageJson: JSON.stringify({ ...usage, durationMs }),
+      });
 
       if (failed) {
         send('done', { runId, length: accumulated.length, durationMs });
@@ -401,17 +461,43 @@ export async function POST(request: Request): Promise<Response> {
 
       // 事件大纲：解析为 Markdown 正文加步骤清单，落库为新的故事事件
       if (taskType === 'outline' || taskType === 'outline_revise') {
-        const steps = parseStepBlocks(accumulated);
+        let steps = parseStepBlocks(accumulated);
         const outlineMarkdown = stripStepBlocks(accumulated).trim();
+
+        /*
+         * 模型并不总会按约定给出步骤区块。先前遇到这种情况直接判失败，
+         * 界面只看到一句「缺少步骤清单」，用户手上的大纲白生成了。
+         *
+         * 现在的顺序是：先按步骤区块解析，没有就退回从大纲结构推导
+         * （有序列表、小节标题、自然段都能落成步骤）。
+         * 两者都拿不到时也不再拦截，大纲正文照常保存成事件，
+         * 只提示这一步暂时无法逐章推进，把决定权留给用户。
+         */
+        let stepsDerived = false;
+        if (steps.length === 0 && outlineMarkdown) {
+          const derived = deriveStepsFromOutline(outlineMarkdown);
+          if (derived.length > 0) {
+            steps = derived.map((step) => ({ title: step.title, time: step.novelTime ?? '' }));
+            stepsDerived = true;
+          }
+        }
+
         if (steps.length === 0) {
-          send('error', { message: '大纲缺少步骤清单，无法建立事件推进节点，请重试' });
-        } else {
+          send('stage', {
+            message:
+              '模型这次没有输出推进步骤，也无法从大纲正文中推导出步骤。大纲已按原样保存，等你在事件页补上步骤后再逐章推进。',
+          });
+        }
+
+        {
           const stepPayload: StoryEventStep[] = steps.map((step) => ({
             title: step.title,
             detail: '',
             novelTime: step.time || undefined,
           }));
-          const title = extractOutlineTitle(outlineMarkdown) || `事件 ${steps.length} 步`;
+          const title =
+            extractOutlineTitle(outlineMarkdown) ||
+            (steps.length > 0 ? `事件 ${steps.length} 步` : '未命名事件');
 
           if (taskType === 'outline_revise' && currentEvent) {
             const updated = updateEventOutline(
@@ -423,6 +509,7 @@ export async function POST(request: Request): Promise<Response> {
             send('event-outline', {
               eventId: currentEvent.id,
               mode: 'revised',
+              stepsDerived,
               title: updated?.title ?? title,
               outline: outlineMarkdown,
               novelTime: updated?.novelTime ?? currentEvent.novelTime,
@@ -443,6 +530,7 @@ export async function POST(request: Request): Promise<Response> {
             send('event-outline', {
               eventId: created.id,
               mode: 'created',
+              stepsDerived,
               title: created.title,
               outline: created.outline,
               novelTime: created.novelTime,

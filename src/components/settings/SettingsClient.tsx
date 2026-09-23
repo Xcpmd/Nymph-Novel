@@ -501,6 +501,21 @@ export function SettingsClient() {
                 </Select>
               </Field>
 
+              <Field
+                label={`${t('settings.uiFontScale')} ${Math.round(settings.uiFontScale * 100)}%`}
+                hint={t('settings.uiFontScaleHint')}
+              >
+                <input
+                  type="range"
+                  min={85}
+                  max={140}
+                  step={5}
+                  value={Math.round(settings.uiFontScale * 100)}
+                  onChange={(event) => void update({ uiFontScale: Number(event.target.value) / 100 })}
+                  className="w-full cursor-pointer accent-[var(--accent)]"
+                />
+              </Field>
+
               <Field label={`${t('settings.readerFontSize')} ${settings.readerFontSize}px`}>
                 <input
                   type="range"

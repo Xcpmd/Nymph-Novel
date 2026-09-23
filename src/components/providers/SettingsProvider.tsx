@@ -43,11 +43,19 @@ export function SettingsProvider({
   useEffect(() => {
     const root = document.documentElement;
     root.style.setProperty('--accent-hue', String(settings.accentHue));
+    root.style.setProperty('--ui-font-scale', String(settings.uiFontScale));
     root.style.setProperty('--reader-font-size', `${settings.readerFontSize}px`);
     root.style.setProperty('--reader-width', `${settings.readerWidth}rem`);
     root.dataset.density = settings.density;
     root.lang = settings.locale === 'zh' ? 'zh-Hans' : settings.locale;
-  }, [settings.accentHue, settings.readerFontSize, settings.readerWidth, settings.density, settings.locale]);
+  }, [
+    settings.accentHue,
+    settings.uiFontScale,
+    settings.readerFontSize,
+    settings.readerWidth,
+    settings.density,
+    settings.locale,
+  ]);
 
   /*
    * 主题模式：system 时跟随系统偏好，其余直接取设定值。
@@ -105,6 +113,7 @@ export function useSettings(): SettingsContextValue {
       readerWidth: 46,
       showStreamingRaw: false,
       showSpeakerName: true,
+      uiFontScale: 1.15,
     };
     return {
       settings: fallback,

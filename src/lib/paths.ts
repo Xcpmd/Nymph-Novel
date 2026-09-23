@@ -57,6 +57,25 @@ export function chapterRelPath(volumeIndex: number, chapterIndex: number): strin
   return `${volumeDirName(volumeIndex)}/${chapterDirName(chapterIndex)}/${CONTENT_FILE_NAME}`;
 }
 
+/** 废案章节的正文目录名。 */
+const SCRAPPED_DIR = 'scrapped';
+
+/**
+ * 废案章节正文的相对路径。
+ *
+ * 废案后正文集中存到独立目录，而不是留在原来的卷章位置上。
+ * 否则后续章节重编号时会把文件搬到废案正占着的路径上，
+ * 两边撞车导致改名失败。
+ */
+export function scrapChapterRelPath(chapterId: string): string {
+  return `${SCRAPPED_DIR}/${chapterId}.md`;
+}
+
+/** 判断正文路径是否落在废案目录里。 */
+export function isScrappedRelPath(relPath: string): boolean {
+  return relPath.startsWith(`${SCRAPPED_DIR}/`);
+}
+
 /** 历史中文卷目录名，例如 卷-001。 */
 export function legacyVolumeDirName(volumeIndex: number): string {
   return `${LEGACY_VOLUME_PREFIX}${String(volumeIndex).padStart(3, '0')}`;

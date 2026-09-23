@@ -35,7 +35,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const themeScript = `(function(){try{var m=${JSON.stringify(settings.themeMode)};var d=m==='system'?(window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):m;document.documentElement.dataset.theme=d;document.documentElement.style.colorScheme=d;}catch(e){}})();`;
 
   return (
-    <html lang="zh-Hans" data-density={settings.density} data-theme="light" suppressHydrationWarning>
+    <html
+      lang="zh-Hans"
+      data-density={settings.density}
+      data-theme="light"
+      /*
+       * 界面字号倍率随服务端设置一并输出，首屏即按用户的字号渲染。
+       * 若交给客户端设置，页面会先用默认倍率画一遍再跳到实际值。
+       */
+      style={{ ['--ui-font-scale' as string]: String(settings.uiFontScale) } as React.CSSProperties}
+      suppressHydrationWarning
+    >
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>

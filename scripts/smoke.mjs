@@ -167,7 +167,8 @@ async function main() {
   });
   check(
     '保存章节时间字段与大纲步进',
-    meta.status === 200 && meta.body?.timelineSort === '天启元年 三月 初七',
+    // 章节更新的返回值与新建、废案等分支保持一致，都是 { chapter, chapters }
+    meta.status === 200 && meta.body?.chapter?.timelineSort === '天启元年 三月 初七',
   );
 
   console.log('五、角色图鉴与关系网');

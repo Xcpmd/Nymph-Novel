@@ -610,13 +610,38 @@ export interface GenerationRun {
   model: string;
   status: 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
   requestJson: string;
+  /** 实际发给模型的消息全文，供请求日志查看 */
+  promptText: string;
+  /** 模型输出全文 */
   partialText: string;
+  /** token 用量与耗时，JSON 字符串 */
+  usageJson: string;
   error: string;
   createdAt: string;
   updatedAt: string;
 }
 
-/** 创建生成任务记录，用于暂停后恢复。 */
+/** 把数据库行转成记录对象，三处查询共用。 */
+function mapRun(row: Record<string, unknown>): GenerationRun {
+  return {
+    id: String(row.id),
+    novelId: String(row.novel_id),
+    chapterId: (row.chapter_id as string | null) ?? null,
+    taskType: row.task_type as TaskType,
+    providerId: (row.provider_id as string | null) ?? null,
+    model: String(row.model ?? ''),
+    status: row.status as GenerationRun['status'],
+    requestJson: String(row.request_json ?? '{}'),
+    promptText: String(row.prompt_text ?? ''),
+    partialText: String(row.partial_text ?? ''),
+    usageJson: String(row.usage_json ?? ''),
+    error: String(row.error ?? ''),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+/** 创建生成任务记录，用于暂停后恢复，同时留作请求日志。 */
 export function createRun(input: {
   novelId: string;
   chapterId?: string | null;
@@ -624,14 +649,16 @@ export function createRun(input: {
   providerId?: string | null;
   model?: string;
   request?: unknown;
+  /** 发给模型的完整消息，便于事后核对上下文 */
+  promptText?: string;
 }): string {
   const id = shortId('run');
   const timestamp = now();
   getDb()
     .prepare(
       `INSERT INTO generation_runs (id, novel_id, chapter_id, task_type, provider_id, model,
-         status, request_json, partial_text, error, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'running', ?, '', '', ?, ?)`,
+         status, request_json, prompt_text, partial_text, usage_json, error, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, '', '', '', ?, ?)`,
     )
     .run(
       id,
@@ -641,6 +668,7 @@ export function createRun(input: {
       input.providerId ?? null,
       input.model ?? '',
       JSON.stringify(input.request ?? {}),
+      input.promptText ?? '',
       timestamp,
       timestamp,
     );
@@ -650,25 +678,28 @@ export function createRun(input: {
 /** 更新生成任务状态与已生成内容。 */
 export function updateRun(
   runId: string,
-  patch: { status?: GenerationRun['status']; partialText?: string; error?: string },
+  patch: {
+    status?: GenerationRun['status'];
+    partialText?: string;
+    error?: string;
+    promptText?: string;
+    usageJson?: string;
+  },
 ): void {
   const fields: string[] = [];
   const values: unknown[] = [];
-  if (patch.status !== undefined) {
-    fields.push('status = ?');
-    values.push(patch.status);
-  }
-  if (patch.partialText !== undefined) {
-    fields.push('partial_text = ?');
-    values.push(patch.partialText);
-  }
-  if (patch.error !== undefined) {
-    fields.push('error = ?');
-    values.push(patch.error);
-  }
+  const assign = (column: string, value: unknown) => {
+    fields.push(`${column} = ?`);
+    values.push(value);
+  };
+  if (patch.status !== undefined) assign('status', patch.status);
+  if (patch.partialText !== undefined) assign('partial_text', patch.partialText);
+  if (patch.error !== undefined) assign('error', patch.error);
+  if (patch.promptText !== undefined) assign('prompt_text', patch.promptText);
+  if (patch.usageJson !== undefined) assign('usage_json', patch.usageJson);
   if (fields.length === 0) return;
-  fields.push('updated_at = ?');
-  values.push(now(), runId);
+  assign('updated_at', now());
+  values.push(runId);
   getDb()
     .prepare(`UPDATE generation_runs SET ${fields.join(', ')} WHERE id = ?`)
     .run(...values);
@@ -679,21 +710,7 @@ export function getRun(runId: string): GenerationRun | null {
   const row = getDb().prepare('SELECT * FROM generation_runs WHERE id = ?').get(runId) as
     | Record<string, unknown>
     | undefined;
-  if (!row) return null;
-  return {
-    id: String(row.id),
-    novelId: String(row.novel_id),
-    chapterId: (row.chapter_id as string | null) ?? null,
-    taskType: row.task_type as TaskType,
-    providerId: (row.provider_id as string | null) ?? null,
-    model: String(row.model ?? ''),
-    status: row.status as GenerationRun['status'],
-    requestJson: String(row.request_json ?? '{}'),
-    partialText: String(row.partial_text ?? ''),
-    error: String(row.error ?? ''),
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at),
-  };
+  return row ? mapRun(row) : null;
 }
 
 /** 列出小说下最近的生成任务。 */
@@ -701,20 +718,7 @@ export function listRuns(novelId: string, limit = 30): GenerationRun[] {
   const rows = getDb()
     .prepare('SELECT * FROM generation_runs WHERE novel_id = ? ORDER BY created_at DESC LIMIT ?')
     .all(novelId, limit) as Array<Record<string, unknown>>;
-  return rows.map((row) => ({
-    id: String(row.id),
-    novelId: String(row.novel_id),
-    chapterId: (row.chapter_id as string | null) ?? null,
-    taskType: row.task_type as TaskType,
-    providerId: (row.provider_id as string | null) ?? null,
-    model: String(row.model ?? ''),
-    status: row.status as GenerationRun['status'],
-    requestJson: String(row.request_json ?? '{}'),
-    partialText: String(row.partial_text ?? ''),
-    error: String(row.error ?? ''),
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at),
-  }));
+  return rows.map(mapRun);
 }
 
 /** 清理超过指定天数的生成任务记录。 */

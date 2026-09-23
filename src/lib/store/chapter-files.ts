@@ -255,7 +255,8 @@ export function migrateChapterDirsOnDisk(novelId: string, relPaths: string[]): n
 export function deleteNovelFiles(novelId: string): void {
   const base = novelDir(novelId);
   if (base !== novelDir(novelId) || !fs.existsSync(base)) return;
-  moveToTrash(base, `novel-${novelId}`);
+  // 目录名本身已经是小说标识，归档名前缀不再重复带上
+  moveToTrash(base, 'novel');
 }
 
 /** 统计小说目录占用的磁盘空间。 */

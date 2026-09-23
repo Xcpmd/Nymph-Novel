@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/primitives';
 import { MarkdownView } from '@/components/markdown/MarkdownView';
 import { ContextInspector } from './ContextInspector';
+import { BudgetConfirmPrompt } from './BudgetConfirmPrompt';
 import { useGeneration } from '@/hooks/useGeneration';
 import { normalizeOptionList } from '@/lib/ai/prompts';
 import { buildSpeakerColors } from '@/lib/markdown/speakers';
@@ -128,6 +129,17 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
   // 正文里不含步骤区块与查询标记，展示前统一剥除
   const cleanOutput = useMemo(() => stripWalkMarkers(output), [output]);
 
+  /**
+   * 本次生成结果是否属于正文任务。
+   *
+   * 各步骤共用同一个生成钩子，第二步产出的大纲会留在 text 里，
+   * 切到第三步时若不区分，大纲就会出现在正文区，字数统计也跟着算错。
+   */
+  const isChapterOutput =
+    generation.meta?.taskType === 'chapter' || generation.meta?.taskType === 'chapter_revise';
+  /** 只取正文任务的输出，供第三步的预览与字数使用 */
+  const chapterOutput = isChapterOutput ? cleanOutput : '';
+
   const activeProvider = useMemo(
     () => providers.find((provider) => provider.isActive) ?? providers[0],
     [providers],
@@ -137,7 +149,7 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
   const speakerColors = useMemo(() => buildSpeakerColors(characters), [characters]);
 
   const target = preferences?.targetWords ?? 3000;
-  const currentWords = countWords(cleanOutput);
+  const currentWords = countWords(chapterOutput);
 
   /**
    * 方向选项。
@@ -167,14 +179,6 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
       }
     : currentEvent;
 
-  /**
-   * 是否为手写方向。
-   *
-   * 点「采用这个方向」会把该方向的标题记入 selectedDirection；
-   * 只要用户手动改动了输入框，selectedDirection 就被清空，这里据此区分两种来源。
-   */
-  const isManualDirection = !selectedDirection && customDirection.trim().length > 0;
-
   const generateDirections = async () => {
     setStep('direction');
     await generation.start({
@@ -186,35 +190,13 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
   };
 
   /**
-   * 把手写的方向直接建成事件大纲，跳过 AI 生成环节。
+   * 确认方向，进入第二步检视并修改故事大纲。
    *
-   * 采纳的是用户自己的判断，不再让模型改写；推进步骤由服务端从文本结构推导。
+   * 手写与 AI 给出的方向走同一条路径，都要经过大纲这一步。
+   * 手写内容不再直接建成事件，否则会绕开大纲，后续推进就少了骨架。
    */
-  const createManualEvent = async (): Promise<boolean> => {
-    try {
-      const result = await api.post<{ event: StoryEvent }>(
-        novelResourcePath(novelId, 'story-events'),
-        {
-          outline: customDirection.trim(),
-          userChoice: customDirection.trim(),
-        },
-      );
-      setCurrentEvent(result.event);
-      toast.success(t('workbench.manualOutlineCreated'));
-      return true;
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
-      return false;
-    }
-  };
-
-  /** 确认方向。手写内容直接充当大纲并跳过第二步，AI 方向则进入第二步生成大纲。 */
-  const confirmDirection = async () => {
-    if (!isManualDirection) {
-      setStep('outline');
-      return;
-    }
-    if (await createManualEvent()) setStep('chapter');
+  const confirmDirection = () => {
+    setStep('outline');
   };
 
   const generateOutline = async () => {
@@ -245,6 +227,26 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
       eventId: activeEvent.id,
       existingContent: activeEvent.outline,
     });
+  };
+
+  /**
+   * 按当前事件大纲拆分章节目录。
+   *
+   * 大纲的每个推进步骤对应一章，一次性建好，后续逐章生成时直接取用。
+   * 已经建过的步骤由服务端跳过，重复点击不会产生重复章节。
+   */
+  const splitChapters = async () => {
+    if (!activeEvent) return;
+    try {
+      const result = await api.patch<{ created: number; chapters: ChapterWithVolume[] }>(
+        novelResourcePath(novelId, 'story-events', activeEvent.id),
+        { action: 'splitChapters' },
+      );
+      setChapters(result.chapters);
+      toast.success(t('workbench.splitDone').replace('{count}', String(result.created)));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+    }
   };
 
   const createChapterIfNeeded = async (): Promise<string | null> => {
@@ -291,10 +293,11 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
   };
 
   const saveToChapter = async () => {
-    if (!chapterId || !cleanOutput.trim()) return;
+    // 只保存正文任务的输出，避免把大纲误写进章节
+    if (!chapterId || !chapterOutput.trim()) return;
     try {
       await api.patch(novelResourcePath(novelId, 'chapters', chapterId), {
-        content: cleanOutput,
+        content: chapterOutput,
         markGenerated: true,
       });
       toast.success(t('common.saved'));
@@ -367,6 +370,9 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
           </button>
         ))}
       </nav>
+
+      {/* 上下文超出预算时，先在这里由用户决定是否保留全文发送 */}
+      <BudgetConfirmPrompt generation={generation} />
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="flex flex-col gap-4">
@@ -446,12 +452,6 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
                   />
                 </Field>
 
-                {isManualDirection ? (
-                  <p className="rounded-[6px] bg-accent-soft px-3 py-2 text-xs leading-relaxed text-accent-strong">
-                    {t('workbench.manualOutlineHint')}
-                  </p>
-                ) : null}
-
                 <Field label={t('setup.ruleExtra')}>
                   <TextArea
                     rows={2}
@@ -463,12 +463,10 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
                 <div className="flex flex-wrap gap-2">
                   <Button
                     variant="primary"
-                    onClick={() => void confirmDirection()}
+                    onClick={confirmDirection}
                     disabled={!(selectedDirection || customDirection).trim()}
                   >
-                    {isManualDirection
-                      ? t('workbench.directionConfirmManual')
-                      : t('workbench.directionConfirm')}
+                    {t('workbench.directionConfirm')}
                     <i className="fa-solid fa-arrow-right" aria-hidden />
                   </Button>
                 </div>
@@ -576,13 +574,21 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
                     onChange={(event) => setOutlineReviseAsk(event.target.value)}
                   />
                 </Field>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Button
                     onClick={reviseOutline}
                     disabled={generation.status === 'running' || !activeEvent}
                   >
                     <i className="fa-solid fa-pen-fancy" aria-hidden />
                     {t('workbench.outlineRevise')}
+                  </Button>
+                  {/* 大纲本身不会自动变成章节，这里给一个明确的动作入口 */}
+                  <Button
+                    onClick={() => void splitChapters()}
+                    disabled={!activeEvent || activeEvent.steps.length === 0}
+                  >
+                    <i className="fa-solid fa-list-ol" aria-hidden />
+                    {t('workbench.splitChapters')}
                   </Button>
                   <Button
                     variant="primary"
@@ -713,11 +719,15 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
                 ) : null}
 
                 <div className="card max-h-[40rem] min-h-[16rem] overflow-y-auto px-5 py-4">
-                  <MarkdownView
-                    content={cleanOutput}
-                    speakers={speakerColors}
-                    showSpeakerName={settings.showSpeakerName}
-                  />
+                  {chapterOutput ? (
+                    <MarkdownView
+                      content={chapterOutput}
+                      speakers={speakerColors}
+                      showSpeakerName={settings.showSpeakerName}
+                    />
+                  ) : (
+                    <p className="text-xs text-ink-faint">{t('workbench.chapterEmpty')}</p>
+                  )}
                 </div>
 
                 {generation.queries.length > 0 ? (
@@ -764,7 +774,7 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
                   <Button
                     variant="primary"
                     onClick={() => setConfirmSave(true)}
-                    disabled={!cleanOutput.trim() || !chapterId}
+                    disabled={!chapterOutput.trim() || !chapterId}
                   >
                     <i className="fa-solid fa-floppy-disk" aria-hidden />
                     {t('workbench.chapterSave')}

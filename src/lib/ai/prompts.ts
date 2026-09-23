@@ -243,6 +243,90 @@ ${ruleBlock()}
 请输出修改后的事件大纲。`,
   },
   {
+    taskType: 'outline_overview_revise',
+    label: '整本书大纲修改',
+    description: '按用户指出的位置与要求改写整本书大纲，保留未被指出的部分。',
+    outputFormat: 'markdown',
+    temperature: 0.7,
+    systemPrompt: `${COMMON_SYSTEM}
+
+当前任务：按用户要求修改整本书大纲。
+要求：
+只改动用户指出的位置，其余内容原样保留，包括主线走向与已有的人物命运。
+改动后必须重新检查与设定、结局规划、已完成事件的一致性，不得与既有情节矛盾。
+输出改写后的完整大纲正文，以 Markdown 书写，不要输出任何解释与说明文字，也不要包裹代码块。
+
+${QUERY_RULES}`,
+    userPrompt: `现有的整本书大纲：
+{{outlineOverview}}
+
+小说标题：{{novelTitle}}
+题材：{{genre}}
+
+设定与世界观：
+{{worldview}}
+
+核心设定补充：
+{{setting}}
+
+结局与收束计划：
+{{endingPlan}}
+
+主要人物档案：
+{{characters}}
+
+小说内历法：{{calendar}}
+
+已完成事件的大纲：
+{{finishedOutlines}}
+
+用户的修改要求：
+{{instruction}}
+
+${ruleBlock()}
+
+请输出修改后的整本书大纲。`,
+  },
+  {
+    taskType: 'outline_node_write',
+    label: '大纲节点撰写',
+    description: '为大纲中的某个节点撰写或改写内容，依据节点标题与上下文展开。',
+    outputFormat: 'markdown',
+    temperature: 0.8,
+    systemPrompt: `${COMMON_SYSTEM}
+
+当前任务：为大纲中的一个节点撰写内容。
+要求：
+内容必须服从整本书大纲与该节点的标题，不得偏离主线或推翻已发生的情节。
+写清这一节点要发生什么、谁在其中做了什么、动机与后果，篇幅与节点的层级相称。
+只输出节点内容本身，不要输出标题，不要输出任何解释性文字，也不要包裹代码块。
+
+${QUERY_RULES}`,
+    userPrompt: `整本书大纲：
+{{outlineOverview}}
+
+设定与世界观：
+{{worldview}}
+
+核心设定补充：
+{{setting}}
+
+主要人物档案：
+{{characters}}
+
+小说内历法：{{calendar}}
+
+已完成事件的大纲：
+{{finishedOutlines}}
+
+待撰写的节点信息：
+{{instruction}}
+
+${ruleBlock()}
+
+请输出这个节点的内容。`,
+  },
+  {
     taskType: 'chapter',
     label: '正文生成',
     description: '按事件大纲的当前步骤写出本章正文，并标记写到了哪一步。',

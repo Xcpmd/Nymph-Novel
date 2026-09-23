@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useSettings } from '@/components/providers/SettingsProvider';
 import { Button } from '@/components/ui/primitives';
 import { MarkdownView } from '@/components/markdown/MarkdownView';
@@ -13,8 +14,10 @@ import type { SpeakerColor } from '@/lib/markdown/speakers';
  * 让注意力落在文字上。正文宽度与字号沿用阅读设置，
  * 因此进出沉浸模式时排版不会跳变。
  *
- * 退出方式有三种：工具条按钮、Esc 键、以及浏览器返回，
- * 其中 Esc 是最顺手的，符合阅读器的一般习惯。
+ * 挂在 body 上而不是就地渲染：页面主体带有层叠上下文，
+ * 就地渲染会被顶部导航盖住，固定定位也会被祖先的变换影响。
+ *
+ * 退出方式有两种：工具条按钮与 Esc 键，Esc 更符合阅读器的一般习惯。
  */
 export function ImmersiveReader({
   title,
@@ -28,6 +31,11 @@ export function ImmersiveReader({
   onClose: () => void;
 }) {
   const { t, settings, update } = useSettings();
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -43,7 +51,9 @@ export function ImmersiveReader({
     };
   }, [onClose]);
 
-  return (
+  if (!mounted) return null;
+
+  return createPortal(
     <div className="immersive-shell" role="dialog" aria-modal="true" aria-label={title}>
       <div className="immersive-bar">
         <span className="flex min-w-0 items-center gap-2 text-sm font-medium text-soft">
@@ -51,8 +61,8 @@ export function ImmersiveReader({
           <span className="truncate">{title}</span>
         </span>
 
-        <div className="ml-auto flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-xs text-ink-muted">
+        <div className="ml-auto flex flex-wrap items-center gap-2 sm:gap-3">
+          <label className="flex items-center gap-1.5 text-xs text-ink-muted">
             <i className="fa-solid fa-font text-[0.72rem]" aria-hidden />
             <input
               type="range"
@@ -60,15 +70,15 @@ export function ImmersiveReader({
               max={28}
               value={settings.readerFontSize}
               onChange={(event) => void update({ readerFontSize: Number(event.target.value) })}
-              className="w-24"
+              className="w-20"
               aria-label={t('settings.readerFontSize')}
             />
-            <span className="w-7 shrink-0 font-mono text-[0.7rem]">
+            <span className="w-6 shrink-0 font-mono text-[0.7rem]">
               {settings.readerFontSize}
             </span>
           </label>
 
-          <label className="flex items-center gap-2 text-xs text-ink-muted">
+          <label className="flex items-center gap-1.5 text-xs text-ink-muted">
             <i className="fa-solid fa-left-right text-[0.72rem]" aria-hidden />
             <input
               type="range"
@@ -76,10 +86,10 @@ export function ImmersiveReader({
               max={72}
               value={settings.readerWidth}
               onChange={(event) => void update({ readerWidth: Number(event.target.value) })}
-              className="w-24"
+              className="w-20"
               aria-label={t('settings.readerWidth')}
             />
-            <span className="w-7 shrink-0 font-mono text-[0.7rem]">
+            <span className="w-6 shrink-0 font-mono text-[0.7rem]">
               {settings.readerWidth}
             </span>
           </label>
@@ -95,14 +105,16 @@ export function ImmersiveReader({
               }
               aria-hidden
             />
-            {settings.showSpeakerName
-              ? t('chapters.hideSpeakerName')
-              : t('chapters.showSpeakerName')}
+            <span className="hidden sm:inline">
+              {settings.showSpeakerName
+                ? t('chapters.hideSpeakerName')
+                : t('chapters.showSpeakerName')}
+            </span>
           </Button>
 
           <Button size="sm" onClick={onClose}>
             <i className="fa-solid fa-compress" aria-hidden />
-            {t('chapters.exitImmersive')}
+            <span className="hidden sm:inline">{t('chapters.exitImmersive')}</span>
           </Button>
         </div>
       </div>
@@ -116,6 +128,7 @@ export function ImmersiveReader({
           />
         </article>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

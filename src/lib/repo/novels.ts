@@ -1,6 +1,6 @@
 import { getDb, now, transact } from '../db';
 import { shortId } from '../crypto';
-import { normalizeContentRelPath } from '../paths';
+import { normalizeContentRelPath, scrapChapterRelPath, volumeDirName } from '../paths';
 import {
   buildRelPath,
   deleteChapterFile,
@@ -66,6 +66,7 @@ interface ChapterRow {
   branch_id: string | null;
   direction: string;
   notes: string;
+  original_index_no?: number | null;
   created_at: string;
   updated_at: string;
   volume_index?: number;
@@ -123,6 +124,7 @@ function mapChapter(row: ChapterRow): Chapter {
     branchId: row.branch_id,
     direction: row.direction,
     notes: row.notes,
+    originalIndexNo: row.original_index_no ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -246,12 +248,16 @@ export function deleteNovel(novelId: string): void {
   deleteNovelFiles(novelId);
 }
 
-/** 重新统计小说的字数、章节数与卷数。 */
+/**
+ * 重新统计小说的字数、章节数与卷数。
+ *
+ * 废案章节不计入：它们已经退出正文，算进总数会让进度显示虚高。
+ */
 export function refreshNovelStats(novelId: string): Novel | null {
   const stats = getDb()
     .prepare(
       `SELECT COUNT(*) AS chapters, COALESCE(SUM(word_count), 0) AS words
-       FROM chapters WHERE novel_id = ?`,
+       FROM chapters WHERE novel_id = ? AND status != 'scrapped'`,
     )
     .get(novelId) as { chapters: number; words: number };
   const volumes = getDb()
@@ -377,22 +383,44 @@ export function renumberVolumes(novelId: string): void {
 export interface ListChapterOptions {
   volumeId?: string;
   withContent?: boolean;
+  /** 是否把废案章节一并列出，默认不列出 */
+  includeScrapped?: boolean;
+  /** 只列出废案章节，供废案区使用 */
+  onlyScrapped?: boolean;
 }
 
-/** 列出某部小说的全部章节，按卷序号与章序号排列。 */
+/**
+ * 列出某部小说的章节，按卷序号与章序号排列。
+ *
+ * 废案章节默认不出现在结果里。它们被排在独立的废案区，
+ * 序号带负偏移，因此单独查询时要用反序才能还原成原本的先后顺序。
+ */
 export function listChapters(novelId: string, options: ListChapterOptions = {}): ChapterWithVolume[] {
   const params: unknown[] = [novelId];
   let where = 'WHERE c.novel_id = ?';
+
+  if (options.onlyScrapped) {
+    where += ' AND c.status = ?';
+    params.push('scrapped');
+  } else if (!options.includeScrapped) {
+    where += ' AND c.status != ?';
+    params.push('scrapped');
+  }
+
   if (options.volumeId) {
     where += ' AND c.volume_id = ?';
     params.push(options.volumeId);
   }
+
+  // 废案的序号是负偏移，取反后才是它原本的位置
+  const order = options.onlyScrapped ? 'ORDER BY v.index_no, -c.index_no' : 'ORDER BY v.index_no, c.index_no';
+
   const rows = getDb()
     .prepare(
       `SELECT c.*, v.index_no AS volume_index, v.title AS volume_title
        FROM chapters c JOIN volumes v ON v.id = c.volume_id
        ${where}
-       ORDER BY v.index_no, c.index_no`,
+       ${order}`,
     )
     .all(...params) as ChapterRow[];
   return rows.map(mapChapterWithVolume);
@@ -506,6 +534,91 @@ export function updateChapter(chapterId: string, patch: Partial<Chapter>): Chapt
   return getChapter(chapterId);
 }
 
+/**
+ * 批量调整章节文件的位置。
+ *
+ * 不能按顺序逐个改名：排在后面的章节常常正占着前面章节的目标路径，
+ * 直接改过去会互相覆盖，在 Windows 上还会直接报错。
+ * 因此先把所有要动的文件挪到临时名，再统一落到目标位置。
+ *
+ * 临时名以点开头并放在卷目录下，不会与章节目录混淆，
+ * 万一中途失败也能一眼看出是残留的中间产物。
+ */
+function relocateChapterFiles(
+  novelId: string,
+  volumeIndex: number,
+  moves: Array<{ from: string; to: string }>,
+): void {
+  const pending = moves.filter((move) => normalizeContentRelPath(move.from) !== move.to);
+  if (pending.length === 0) return;
+
+  const staged: Array<{ temp: string; to: string }> = [];
+  pending.forEach((move, index) => {
+    const temp = `${volumeDirName(volumeIndex)}/.staging-${index}.md`;
+    moveChapterFile(novelId, move.from, temp);
+    staged.push({ temp, to: move.to });
+  });
+  for (const item of staged) {
+    moveChapterFile(novelId, item.temp, item.to);
+  }
+}
+
+/**
+ * 把章节移动到卷内的指定序号。
+ *
+ * 目标位置及其后的章节顺移一位。表上有 UNIQUE(volume_id, index_no)，
+ * 因此不能直接改写序号，先把整卷章节挪到负数占位，再按新顺序写回正数。
+ * 磁盘上的正文文件同步改名，否则序号与目录会对不上。
+ */
+export function moveChapterToIndex(
+  chapterId: string,
+  targetIndex: number,
+): ChapterWithVolume | null {
+  const chapter = getChapter(chapterId);
+  if (!chapter) return null;
+  const volume = getVolume(chapter.volumeId);
+  if (!volume) return null;
+
+  const rows = getDb()
+    .prepare('SELECT id, index_no, rel_path FROM chapters WHERE volume_id = ? ORDER BY index_no')
+    .all(chapter.volumeId) as Array<{ id: string; index_no: number; rel_path: string }>;
+
+  const others = rows.filter((row) => row.id !== chapterId);
+  // 目标序号夹在合法范围内，越界时贴到两端
+  const position = Math.max(1, Math.min(targetIndex, others.length + 1));
+  const ordered = [...others];
+  ordered.splice(position - 1, 0, {
+    id: chapterId,
+    index_no: chapter.indexNo,
+    rel_path: chapter.relPath,
+  });
+
+  transact(() => {
+    // 先全部落到负数，避开唯一约束
+    ordered.forEach((row, index) => {
+      getDb().prepare('UPDATE chapters SET index_no = ? WHERE id = ?').run(-(index + 1), row.id);
+    });
+    ordered.forEach((row, index) => {
+      getDb()
+        .prepare('UPDATE chapters SET index_no = ?, rel_path = ?, updated_at = ? WHERE id = ?')
+        .run(index + 1, buildRelPath(volume.indexNo, index + 1), now(), row.id);
+    });
+  });
+
+  // 文件移动放在事务之外，避免拖长写锁
+  relocateChapterFiles(
+    volume.novelId,
+    volume.indexNo,
+    ordered.map((row, index) => ({
+      from: row.rel_path,
+      to: buildRelPath(volume.indexNo, index + 1),
+    })),
+  );
+
+  refreshNovelStats(chapter.novelId);
+  return getChapter(chapterId);
+}
+
 /** 读取章节正文，同时把磁盘实际字数回写到数据库。 */
 export function getChapterContent(chapterId: string): { chapter: ChapterWithVolume; content: string } {
   const chapter = getChapter(chapterId);
@@ -544,6 +657,129 @@ export function saveChapterContent(
   return getChapter(chapterId);
 }
 
+/* ------------------------------------------------------- 章节废案与还原 */
+
+/**
+ * 废案章节在序号上的偏移量。
+ *
+ * 表上有 UNIQUE(volume_id, index_no) 约束，而废案章节仍需留在原卷里等用户决定去留，
+ * 因此把序号翻到负数区间腾出位置。偏移量取得足够大，
+ * 与重编号时用的小负数占位（-1 起步）互不干扰。
+ */
+export const SCRAPPED_INDEX_OFFSET = 100000;
+
+/** 编号是否为废案章节所用。 */
+export function isScrappedIndex(indexNo: number): boolean {
+  return indexNo <= -SCRAPPED_INDEX_OFFSET;
+}
+
+/** 由废案序号还原出它原本的位置。 */
+function originalIndex(indexNo: number): number {
+  return -indexNo - SCRAPPED_INDEX_OFFSET;
+}
+
+/**
+ * 为废章找一个未被占用的负序号。
+ *
+ * 直接用「偏移量加原序号」会撞车：同一卷里若有两个章节先后从同一位置被废，
+ * 算出的负数完全相同。这里在原序号的基础上继续往下找，直到没有冲突为止。
+ * 原位置因此不再编码在序号里，改由 original_index_no 单独记录。
+ */
+function nextScrappedIndex(volumeId: string, baseIndex: number): number {
+  const used = new Set(
+    (
+      getDb()
+        .prepare('SELECT index_no FROM chapters WHERE volume_id = ?')
+        .all(volumeId) as Array<{ index_no: number }>
+    ).map((row) => row.index_no),
+  );
+  let candidate = -(SCRAPPED_INDEX_OFFSET + baseIndex);
+  while (used.has(candidate)) candidate -= 1;
+  return candidate;
+}
+
+/**
+ * 把一个章节设为废案。
+ *
+ * 记录与正文都保留，只是移出正常目录并让出序号。
+ * 正文一并挪到独立的废案目录：留在原位的话，后续章节重编号
+ * 会把文件搬到废案正占着的路径上，两边撞车导致改名失败。
+ */
+export function scrapChapter(chapterId: string): ChapterWithVolume | null {
+  const chapter = getChapter(chapterId);
+  if (!chapter || chapter.status === 'scrapped') return chapter;
+
+  const targetRel = scrapChapterRelPath(chapterId);
+  moveChapterFile(chapter.novelId, chapter.relPath, targetRel);
+
+  getDb()
+    .prepare(
+      `UPDATE chapters
+       SET status = 'scrapped', index_no = ?, original_index_no = ?, rel_path = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(
+      nextScrappedIndex(chapter.volumeId, chapter.indexNo),
+      chapter.indexNo,
+      targetRel,
+      now(),
+      chapterId,
+    );
+
+  // 腾出的位置由后续章节依次补上
+  renumberChapters(chapter.volumeId);
+  refreshNovelStats(chapter.novelId);
+  return getChapter(chapterId);
+}
+
+/** 还原废案的结果。失败时给出原因与占位章节名，供界面提示。 */
+export type RestoreChapterResult =
+  | { ok: true; chapter: ChapterWithVolume }
+  | {
+      ok: false;
+      reason: 'notFound' | 'notScrapped' | 'occupied';
+      chapter: ChapterWithVolume | null;
+      occupiedTitle?: string;
+    };
+
+/**
+ * 把废案章节还原回正常目录。
+ *
+ * 原本的位置此时可能已被别的章节占用。这种情况不自动挤走对方，
+ * 而是让调用方先去把那章设为废案，避免悄悄改动用户没打算动的章节。
+ */
+export function restoreChapter(chapterId: string): RestoreChapterResult {
+  const chapter = getChapter(chapterId);
+  if (!chapter) return { ok: false, reason: 'notFound', chapter: null };
+  if (chapter.status !== 'scrapped') return { ok: false, reason: 'notScrapped', chapter };
+
+  // 原位置由专用字段记录，读不到时退回早期版本编码在序号里的写法
+  const target = chapter.originalIndexNo ?? originalIndex(chapter.indexNo);
+  const occupied = getDb()
+    .prepare('SELECT title FROM chapters WHERE volume_id = ? AND index_no = ?')
+    .get(chapter.volumeId, target) as { title: string } | undefined;
+
+  if (occupied) {
+    return { ok: false, reason: 'occupied', chapter, occupiedTitle: occupied.title };
+  }
+
+  // 状态按内容还原：有正文的回到已生成，空章回到待写
+  const restored: ChapterStatus = chapter.wordCount > 0 ? 'generated' : 'planned';
+  const targetRel = buildRelPath(chapter.volumeIndex, target);
+  moveChapterFile(chapter.novelId, chapter.relPath, targetRel);
+
+  getDb()
+    .prepare(
+      `UPDATE chapters
+       SET status = ?, index_no = ?, original_index_no = NULL, rel_path = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(restored, target, targetRel, now(), chapterId);
+
+  refreshNovelStats(chapter.novelId);
+  return { ok: true, chapter: getChapter(chapterId)! };
+}
+
 /** 删除章节及其正文文件。 */
 export function deleteChapter(chapterId: string): void {
   const chapter = getChapter(chapterId);
@@ -557,13 +793,22 @@ export function deleteChapter(chapterId: string): void {
   refreshNovelStats(chapter.novelId);
 }
 
-/** 重排某一卷内章节序号，并同步移动正文文件。 */
+/**
+ * 重排某一卷内章节序号，并同步移动正文文件。
+ *
+ * 废案章节不参与重排：它们已经移出正常序列，序号是负偏移，
+ * 若一并重排会把它们拉回正数区间，与正常章节抢号。
+ */
 export function renumberChapters(volumeId: string): void {
   const volume = getVolume(volumeId);
   if (!volume) return;
 
   const rows = getDb()
-    .prepare('SELECT id, index_no, rel_path FROM chapters WHERE volume_id = ? ORDER BY index_no')
+    .prepare(
+      `SELECT id, index_no, rel_path FROM chapters
+       WHERE volume_id = ? AND status != 'scrapped'
+       ORDER BY index_no`,
+    )
     .all(volumeId) as Array<{ id: string; index_no: number; rel_path: string }>;
 
   transact(() => {
@@ -581,13 +826,14 @@ export function renumberChapters(volumeId: string): void {
   });
 
   // 文件移动放在事务之外，避免拖长写锁占用
-  rows.forEach((row, position) => {
-    const target = buildRelPath(volume.indexNo, position + 1);
-    // 库中可能还留着早期的中文路径，先归一再比对，避免误判为需要移动
-    if (target !== normalizeContentRelPath(row.rel_path)) {
-      moveChapterFile(volume.novelId, row.rel_path, target);
-    }
-  });
+  relocateChapterFiles(
+    volume.novelId,
+    volume.indexNo,
+    rows.map((row, position) => ({
+      from: row.rel_path,
+      to: buildRelPath(volume.indexNo, position + 1),
+    })),
+  );
 }
 
 /** 全文索引重建。 */

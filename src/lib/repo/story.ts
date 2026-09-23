@@ -6,6 +6,7 @@ import type {
   CharacterRole,
   EncyclopediaEntry,
   EncyclopediaQuery,
+  EncyclopediaVersion,
   EventRecallRequest,
   ForeshadowingItem,
   OutlineKind,
@@ -586,24 +587,92 @@ interface EncyclopediaRow {
   updated_at: string;
 }
 
-function mapEntry(row: EncyclopediaRow): EncyclopediaEntry {
+/** 百科版本行。 */
+interface EncyclopediaVersionRow {
+  id: string;
+  entry_id: string;
+  novel_id: string;
+  version_no: number;
+  summary: string;
+  content: string;
+  tags: string;
+  source_chapter_id: string | null;
+  origin: string;
+  is_active: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapVersion(row: EncyclopediaVersionRow): EncyclopediaVersion {
+  return {
+    id: row.id,
+    entryId: row.entry_id,
+    novelId: row.novel_id,
+    versionNo: row.version_no,
+    summary: row.summary,
+    content: row.content,
+    tags: parseJson<string[]>(row.tags, []),
+    sourceChapterId: row.source_chapter_id,
+    origin: row.origin === 'ai' ? 'ai' : 'manual',
+    isActive: row.is_active === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** 一次查出全部条目的版本统计，避免逐条查询。 */
+function loadVersionStats(novelId: string): Map<string, { count: number; activeNo: number }> {
+  const rows = getDb()
+    .prepare(
+      `SELECT entry_id AS entryId,
+              COUNT(*) AS count,
+              COALESCE(MAX(CASE WHEN is_active = 1 THEN version_no END), 0) AS activeNo
+       FROM encyclopedia_versions
+       WHERE novel_id = ?
+       GROUP BY entry_id`,
+    )
+    .all(novelId) as Array<{ entryId: string; count: number; activeNo: number }>;
+  return new Map(rows.map((row) => [row.entryId, { count: row.count, activeNo: row.activeNo }]));
+}
+
+/** 一次查出全部启用版本的正文。 */
+function loadActiveVersions(novelId: string): Map<string, EncyclopediaVersionRow> {
+  const rows = getDb()
+    .prepare('SELECT * FROM encyclopedia_versions WHERE novel_id = ? AND is_active = 1')
+    .all(novelId) as EncyclopediaVersionRow[];
+  const map = new Map<string, EncyclopediaVersionRow>();
+  for (const row of rows) {
+    const current = map.get(row.entry_id);
+    // 每个条目正常只有一条启用版本，出现多条时取版本号最大的那个
+    if (!current || row.version_no > current.version_no) map.set(row.entry_id, row);
+  }
+  return map;
+}
+
+function mapEntry(
+  row: EncyclopediaRow,
+  version?: EncyclopediaVersionRow,
+  stats?: { count: number; activeNo: number },
+): EncyclopediaEntry {
   return {
     id: row.id,
     novelId: row.novel_id,
     category: row.category,
     name: row.name,
     aliases: row.aliases,
-    summary: row.summary,
-    content: row.content,
-    tags: parseJson<string[]>(row.tags, []),
-    sourceChapterId: row.source_chapter_id,
+    summary: version?.summary ?? '',
+    content: version?.content ?? '',
+    tags: parseJson<string[]>(version?.tags ?? '[]', []),
+    sourceChapterId: version?.source_chapter_id ?? null,
     sortNo: row.sort_no,
+    activeVersionNo: stats?.activeNo ?? version?.version_no ?? 0,
+    versionCount: stats?.count ?? (version ? 1 : 0),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-/** 列出百科条目。 */
+/** 列出百科条目，正文取各自的启用版本。 */
 export function listEncyclopedia(novelId: string, category?: string): EncyclopediaEntry[] {
   const params: unknown[] = [novelId];
   let where = 'WHERE novel_id = ?';
@@ -614,15 +683,127 @@ export function listEncyclopedia(novelId: string, category?: string): Encycloped
   const rows = getDb()
     .prepare(`SELECT * FROM encyclopedia_entries ${where} ORDER BY category, sort_no, name`)
     .all(...params) as EncyclopediaRow[];
-  return rows.map(mapEntry);
+  const versions = loadActiveVersions(novelId);
+  const stats = loadVersionStats(novelId);
+  return rows.map((row) => mapEntry(row, versions.get(row.id), stats.get(row.id)));
 }
 
-/** 读取单条百科条目。 */
+/** 读取单条百科条目，正文取它的启用版本。 */
 export function getEncyclopediaEntry(entryId: string): EncyclopediaEntry | null {
   const row = getDb()
     .prepare('SELECT * FROM encyclopedia_entries WHERE id = ?')
     .get(entryId) as EncyclopediaRow | undefined;
-  return row ? mapEntry(row) : null;
+  if (!row) return null;
+  const version = getDb()
+    .prepare(
+      'SELECT * FROM encyclopedia_versions WHERE entry_id = ? AND is_active = 1 ORDER BY version_no DESC LIMIT 1',
+    )
+    .get(entryId) as EncyclopediaVersionRow | undefined;
+  const stats = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS count,
+              COALESCE(MAX(CASE WHEN is_active = 1 THEN version_no END), 0) AS activeNo
+       FROM encyclopedia_versions WHERE entry_id = ?`,
+    )
+    .get(entryId) as { count: number; activeNo: number } | undefined;
+  return mapEntry(row, version, stats ?? undefined);
+}
+
+/** 按名称查找条目，供同名追加版本时使用。 */
+export function findEncyclopediaByName(
+  novelId: string,
+  name: string,
+): EncyclopediaRow | undefined {
+  return getDb()
+    .prepare('SELECT * FROM encyclopedia_entries WHERE novel_id = ? AND name = ? LIMIT 1')
+    .get(novelId, name.trim()) as EncyclopediaRow | undefined;
+}
+
+/** 列出某条目的全部版本，新的在前。 */
+export function listEncyclopediaVersions(entryId: string): EncyclopediaVersion[] {
+  const rows = getDb()
+    .prepare('SELECT * FROM encyclopedia_versions WHERE entry_id = ? ORDER BY version_no DESC')
+    .all(entryId) as EncyclopediaVersionRow[];
+  return rows.map(mapVersion);
+}
+
+/** 读取单个版本。 */
+export function getEncyclopediaVersion(versionId: string): EncyclopediaVersion | null {
+  const row = getDb()
+    .prepare('SELECT * FROM encyclopedia_versions WHERE id = ?')
+    .get(versionId) as EncyclopediaVersionRow | undefined;
+  return row ? mapVersion(row) : null;
+}
+
+/**
+ * 把某条版本设为启用，同条目的其余版本一并停用。
+ *
+ * 启用版本决定条目对外呈现的正文，也是唯一会进入模型上下文的那一版。
+ */
+export function activateEncyclopediaVersion(versionId: string): EncyclopediaEntry | null {
+  const version = getDb()
+    .prepare('SELECT * FROM encyclopedia_versions WHERE id = ?')
+    .get(versionId) as EncyclopediaVersionRow | undefined;
+  if (!version) return null;
+
+  transact(() => {
+    getDb()
+      .prepare('UPDATE encyclopedia_versions SET is_active = 0 WHERE entry_id = ?')
+      .run(version.entry_id);
+    getDb()
+      .prepare('UPDATE encyclopedia_versions SET is_active = 1, updated_at = ? WHERE id = ?')
+      .run(now(), versionId);
+  });
+  return getEncyclopediaEntry(version.entry_id);
+}
+
+/** 为条目追加一条版本，并把它设为启用。 */
+function addEncyclopediaVersion(
+  entryId: string,
+  novelId: string,
+  body: {
+    summary: string;
+    content: string;
+    tags: string[];
+    sourceChapterId: string | null;
+    origin: 'ai' | 'manual';
+  },
+): EncyclopediaVersionRow {
+  const max = getDb()
+    .prepare('SELECT COALESCE(MAX(version_no), 0) AS maxNo FROM encyclopedia_versions WHERE entry_id = ?')
+    .get(entryId) as { maxNo: number };
+  const next = max.maxNo + 1;
+  const timestamp = now();
+
+  transact(() => {
+    // 先停用其余版本，保证同一条目始终只有一条启用
+    getDb()
+      .prepare('UPDATE encyclopedia_versions SET is_active = 0 WHERE entry_id = ?')
+      .run(entryId);
+    getDb()
+      .prepare(
+        `INSERT INTO encyclopedia_versions (id, entry_id, novel_id, version_no, summary, content,
+           tags, source_chapter_id, origin, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      )
+      .run(
+        shortId('encv'),
+        entryId,
+        novelId,
+        next,
+        body.summary,
+        body.content,
+        JSON.stringify(body.tags),
+        body.sourceChapterId,
+        body.origin,
+        timestamp,
+        timestamp,
+      );
+  });
+
+  return getDb()
+    .prepare('SELECT * FROM encyclopedia_versions WHERE entry_id = ? ORDER BY version_no DESC LIMIT 1')
+    .get(entryId) as EncyclopediaVersionRow;
 }
 
 /** 百科目录：按分类归组的树。 */
@@ -641,15 +822,50 @@ export function getEncyclopediaCatalog(
     .sort((a, b) => b.count - a.count || a.category.localeCompare(b.category, 'zh-Hans-CN'));
 }
 
-export type EncyclopediaInput = Partial<Omit<EncyclopediaEntry, 'id' | 'novelId' | 'createdAt' | 'updatedAt'>> & {
-  name: string;
-};
+export type EncyclopediaInput =
+  Partial<Omit<EncyclopediaEntry, 'id' | 'novelId' | 'createdAt' | 'updatedAt'>> & {
+    name: string;
+    /** 版本来源。模型抽取的结果记为 ai，便于追溯与默认启用策略 */
+    origin?: 'ai' | 'manual';
+  };
 
-/** 新建百科条目。 */
+/**
+ * 登记一条百科内容。
+ *
+ * 同名条目已经存在时，不建重复条目，而是在它下面追加一个新版本并启用，
+ * 旧版本原样保留。这样模型反复抽取同一个词条不会把条目列表撑爆，
+ * 也能留住被替换掉的旧稿。
+ */
 export function createEncyclopediaEntry(
   novelId: string,
   input: EncyclopediaInput,
 ): EncyclopediaEntry {
+  const origin = input.origin === 'ai' ? 'ai' : 'manual';
+  const existing = findEncyclopediaByName(novelId, input.name);
+
+  if (existing) {
+    addEncyclopediaVersion(existing.id, novelId, {
+      summary: input.summary ?? '',
+      content: input.content ?? '',
+      tags: input.tags ?? [],
+      sourceChapterId: input.sourceChapterId ?? null,
+      origin,
+    });
+    // 顺带补全分类与别名，让后登记的版本能丰富条目的身份信息
+    if (input.category || input.aliases) {
+      getDb()
+        .prepare(
+          `UPDATE encyclopedia_entries
+           SET category = COALESCE(NULLIF(?, ''), category),
+               aliases = COALESCE(NULLIF(?, ''), aliases),
+               updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(input.category?.trim() ?? '', input.aliases ?? '', now(), existing.id);
+    }
+    return getEncyclopediaEntry(existing.id)!;
+  }
+
   const max = getDb()
     .prepare('SELECT COALESCE(MAX(sort_no), 0) AS maxSort FROM encyclopedia_entries WHERE novel_id = ?')
     .get(novelId) as { maxSort: number };
@@ -657,9 +873,8 @@ export function createEncyclopediaEntry(
   const timestamp = now();
   getDb()
     .prepare(
-      `INSERT INTO encyclopedia_entries (id, novel_id, category, name, aliases, summary, content,
-         tags, source_chapter_id, sort_no, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO encyclopedia_entries (id, novel_id, category, name, aliases, sort_no, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -667,18 +882,26 @@ export function createEncyclopediaEntry(
       input.category?.trim() || '其他',
       input.name,
       input.aliases ?? '',
-      input.summary ?? '',
-      input.content ?? '',
-      JSON.stringify(input.tags ?? []),
-      input.sourceChapterId ?? null,
       input.sortNo ?? max.maxSort + 1,
       timestamp,
       timestamp,
     );
+  addEncyclopediaVersion(id, novelId, {
+    summary: input.summary ?? '',
+    content: input.content ?? '',
+    tags: input.tags ?? [],
+    sourceChapterId: input.sourceChapterId ?? null,
+    origin,
+  });
   return getEncyclopediaEntry(id)!;
 }
 
-/** 更新百科条目。 */
+/**
+ * 更新百科条目。
+ *
+ * 身份信息改在条目上，正文改动落在当前启用的版本上，
+ * 因此手动编辑不会凭空多出版本；条目还没有版本时先补一个。
+ */
 export function updateEncyclopediaEntry(
   entryId: string,
   patch: Partial<EncyclopediaEntry>,
@@ -692,16 +915,55 @@ export function updateEncyclopediaEntry(
   if (patch.category !== undefined) assign('category', patch.category);
   if (patch.name !== undefined) assign('name', patch.name);
   if (patch.aliases !== undefined) assign('aliases', patch.aliases);
-  if (patch.summary !== undefined) assign('summary', patch.summary);
-  if (patch.content !== undefined) assign('content', patch.content);
-  if (patch.tags !== undefined) assign('tags', JSON.stringify(patch.tags));
-  if (patch.sourceChapterId !== undefined) assign('source_chapter_id', patch.sourceChapterId);
   if (patch.sortNo !== undefined) assign('sort_no', patch.sortNo);
-  if (fields.length === 0) return getEncyclopediaEntry(entryId);
-  assign('updated_at', now());
-  getDb()
-    .prepare(`UPDATE encyclopedia_entries SET ${fields.join(', ')} WHERE id = ?`)
-    .run(...values, entryId);
+  if (fields.length > 0) {
+    assign('updated_at', now());
+    getDb()
+      .prepare(`UPDATE encyclopedia_entries SET ${fields.join(', ')} WHERE id = ?`)
+      .run(...values, entryId);
+  }
+
+  const touchesContent =
+    patch.summary !== undefined || patch.content !== undefined || patch.tags !== undefined;
+  if (touchesContent) {
+    const version = getDb()
+      .prepare(
+        'SELECT * FROM encyclopedia_versions WHERE entry_id = ? AND is_active = 1 ORDER BY version_no DESC LIMIT 1',
+      )
+      .get(entryId) as EncyclopediaVersionRow | undefined;
+
+    if (!version) {
+      const entry = getDb()
+        .prepare('SELECT novel_id FROM encyclopedia_entries WHERE id = ?')
+        .get(entryId) as { novel_id: string } | undefined;
+      if (!entry) return null;
+      addEncyclopediaVersion(entryId, entry.novel_id, {
+        summary: patch.summary ?? '',
+        content: patch.content ?? '',
+        tags: patch.tags ?? [],
+        sourceChapterId: patch.sourceChapterId ?? null,
+        origin: 'manual',
+      });
+    } else {
+      const versionFields: string[] = [];
+      const versionValues: unknown[] = [];
+      const assignVersion = (column: string, value: unknown) => {
+        versionFields.push(`${column} = ?`);
+        versionValues.push(value);
+      };
+      if (patch.summary !== undefined) assignVersion('summary', patch.summary);
+      if (patch.content !== undefined) assignVersion('content', patch.content);
+      if (patch.tags !== undefined) assignVersion('tags', JSON.stringify(patch.tags));
+      if (patch.sourceChapterId !== undefined) {
+        assignVersion('source_chapter_id', patch.sourceChapterId);
+      }
+      assignVersion('updated_at', now());
+      getDb()
+        .prepare(`UPDATE encyclopedia_versions SET ${versionFields.join(', ')} WHERE id = ?`)
+        .run(...versionValues, version.id);
+    }
+  }
+
   return getEncyclopediaEntry(entryId);
 }
 

@@ -6,9 +6,18 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, novelResourcePath } from '@/lib/client/api';
 import { useSettings } from '@/components/providers/SettingsProvider';
 import { useToast } from '@/components/ui/Toast';
-import { ConfirmDialog } from '@/components/ui/Modal';
-import { Button, EmptyState, Panel, Spinner } from '@/components/ui/primitives';
+import { ConfirmDialog, Modal } from '@/components/ui/Modal';
+import {
+  Button,
+  EmptyState,
+  Field,
+  Panel,
+  Spinner,
+  TextArea,
+  Toggle,
+} from '@/components/ui/primitives';
 import { MarkdownView } from '@/components/markdown/MarkdownView';
+import { deriveStepsFromOutline } from '@/lib/markdown/outline';
 import type { StoryEvent, StoryEventListPayload, StoryEventStatus } from '@/lib/types';
 
 /** 事件大纲页。按状态分组展示全部故事事件及其大纲步骤与推进进度。 */
@@ -23,6 +32,13 @@ export function EventsClient({ novelId }: { novelId: string }) {
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<StoryEvent | null>(null);
+  /** 正在编辑大纲的事件 */
+  const [outlineEditing, setOutlineEditing] = useState<StoryEvent | null>(null);
+  /** 大纲编辑草稿 */
+  const [outlineDraft, setOutlineDraft] = useState('');
+  /** 保存大纲时是否按新文本重推推进步骤 */
+  const [rederiveSteps, setRederiveSteps] = useState(false);
+  const [savingOutline, setSavingOutline] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -64,6 +80,55 @@ export function EventsClient({ novelId }: { novelId: string }) {
       await load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+    }
+  };
+
+  /*
+   * 事件大纲的直接编辑。
+   *
+   * 事件大纲此前只能由模型生成，或在生成时用指令改动，
+   * 想调整某句话就得重跑一次生成。这里补上直接改文本的入口。
+   *
+   * 步骤清单默认不动：步骤上可能已经有用户调整过的时间与细节，
+   * 重推会丢掉这些内容，因此只在用户明确要求时才按新大纲重推。
+   */
+  const openOutlineEdit = (event: StoryEvent) => {
+    setOutlineEditing(event);
+    setOutlineDraft(event.outline ?? '');
+    setRederiveSteps(false);
+  };
+
+  const saveOutline = async () => {
+    if (!outlineEditing) return;
+    const text = outlineDraft.trim();
+    if (!text) {
+      toast.error(t('common.required'));
+      return;
+    }
+    setSavingOutline(true);
+    try {
+      const payload: Record<string, unknown> = { outline: text };
+      if (rederiveSteps) {
+        const steps = deriveStepsFromOutline(text);
+        if (steps.length === 0) {
+          toast.error(t('events.rederiveFailed'));
+          setSavingOutline(false);
+          return;
+        }
+        payload.steps = steps.map((step) => ({
+          title: step.title,
+          detail: step.detail,
+          novelTime: step.novelTime,
+        }));
+      }
+      await api.patch(novelResourcePath(novelId, 'story-events', outlineEditing.id), payload);
+      setOutlineEditing(null);
+      toast.success(t('common.saved'));
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+    } finally {
+      setSavingOutline(false);
     }
   };
 
@@ -200,6 +265,14 @@ export function EventsClient({ novelId }: { novelId: string }) {
                             </Link>
                             <Button
                               size="sm"
+                              onClick={() => openOutlineEdit(event)}
+                              title={t('events.editOutline')}
+                            >
+                              <i className="fa-solid fa-pen" aria-hidden />
+                              <span className="hidden sm:inline">{t('events.editOutline')}</span>
+                            </Button>
+                            <Button
+                              size="sm"
                               variant="danger"
                               className="ml-auto"
                               onClick={() => setPendingDelete(event)}
@@ -217,6 +290,39 @@ export function EventsClient({ novelId }: { novelId: string }) {
           ))}
         </div>
       )}
+
+      <Modal
+        open={outlineEditing !== null}
+        title={t('events.editOutline')}
+        description={t('events.editOutlineHint')}
+        size="xl"
+        onClose={() => setOutlineEditing(null)}
+        footer={
+          <>
+            <Button onClick={() => setOutlineEditing(null)}>{t('common.cancel')}</Button>
+            <Button variant="primary" onClick={saveOutline} disabled={savingOutline}>
+              {savingOutline ? <Spinner /> : <i className="fa-solid fa-floppy-disk" aria-hidden />}
+              {t('common.save')}
+            </Button>
+          </>
+        }
+      >
+        <div className="grid gap-3.5">
+          <Field label={t('events.outlineContent')} hint={t('events.outlineContentHint')}>
+            <TextArea
+              rows={18}
+              value={outlineDraft}
+              onChange={(event) => setOutlineDraft(event.target.value)}
+            />
+          </Field>
+          <Toggle
+            checked={rederiveSteps}
+            onChange={setRederiveSteps}
+            label={t('events.rederiveSteps')}
+            hint={t('events.rederiveStepsHint')}
+          />
+        </div>
+      </Modal>
 
       <ConfirmDialog
         open={pendingDelete !== null}

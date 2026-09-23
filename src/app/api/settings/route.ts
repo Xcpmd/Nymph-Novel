@@ -1,9 +1,14 @@
 import { asInt, asString, handle, readBody } from '@/lib/api/http';
-import { DEFAULT_APP_SETTINGS, getAppSettings, updateAppSettings } from '@/lib/repo/settings';
+import {
+  DEFAULT_APP_SETTINGS,
+  DEFAULT_BUDGET,
+  UI_FONT_SCALE_RANGE,
+  getAppSettings,
+  updateAppSettings,
+} from '@/lib/repo/settings';
 import { getDatabaseSize, getDataDir, getSchemaVersion } from '@/lib/db';
 import { ensureDefaultProviders } from '@/lib/service/bootstrap';
 import { listProviders } from '@/lib/repo/library';
-import { DEFAULT_BUDGET } from '@/lib/repo/settings';
 
 /** GET /api/settings 读取全局设置与运行环境信息。 */
 export async function GET() {
@@ -45,6 +50,14 @@ export async function PATCH(request: Request) {
     if (readerWidth !== undefined) patch.readerWidth = readerWidth;
     if (typeof body.showStreamingRaw === 'boolean') patch.showStreamingRaw = body.showStreamingRaw;
     if (typeof body.showSpeakerName === 'boolean') patch.showSpeakerName = body.showSpeakerName;
+    // 界面字号是倍率，取两位小数，越界时夹到可调区间内
+    if (typeof body.uiFontScale === 'number' && Number.isFinite(body.uiFontScale)) {
+      const clamped = Math.min(
+        UI_FONT_SCALE_RANGE.max,
+        Math.max(UI_FONT_SCALE_RANGE.min, body.uiFontScale),
+      );
+      patch.uiFontScale = Math.round(clamped * 100) / 100;
+    }
     if (body.activeProviderId !== undefined) {
       patch.activeProviderId = asString(body.activeProviderId) ?? null;
     }

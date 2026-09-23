@@ -22,6 +22,7 @@ function runMigrations(db: Db): void {
       for (const statement of migration.statements) {
         db.exec(statement);
       }
+      migration.run?.(db);
       db.pragma(`user_version = ${migration.version}`);
     });
     apply();

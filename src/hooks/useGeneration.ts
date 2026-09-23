@@ -99,6 +99,17 @@ export interface RecallRequestItem {
   reason: string;
 }
 
+/**
+ * 上下文超出预算的提示。
+ *
+ * 服务端不再默默裁剪，而是把超出的层回传，由界面给出二次确认。
+ */
+export interface BudgetExceededInfo {
+  totalTokens: number;
+  budget: { total: number; always: number; recalled: number; outlines: number; reserved: number };
+  layers: Array<{ key: string; label: string; tokens: number }>;
+}
+
 export interface GenerationRequest {
   novelId: string;
   chapterId?: string | null;
@@ -123,6 +134,8 @@ export interface GenerationRequest {
   resumeFrom?: string;
   resumeRunId?: string;
   maxTokens?: number;
+  /** 上下文超出预算并已由用户确认保留全文 */
+  confirmOverBudget?: boolean;
 }
 
 export function useGeneration() {
@@ -139,6 +152,8 @@ export function useGeneration() {
   const [saved, setSaved] = useState<{ chapterId: string; wordCount: number } | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
+  /** 上下文超出预算时的提示，界面据此给出二次确认 */
+  const [budgetExceeded, setBudgetExceeded] = useState<BudgetExceededInfo | null>(null);
 
   const controllerRef = useRef<AbortController | null>(null);
   const lastRequestRef = useRef<GenerationRequest | null>(null);
@@ -161,6 +176,7 @@ export function useGeneration() {
     setSaved(null);
     setMessage('');
     setError(null);
+    setBudgetExceeded(null);
   }, []);
 
   const start = useCallback(async (payload: GenerationRequest, keepExisting = false) => {
@@ -181,6 +197,7 @@ export function useGeneration() {
       setRecalls([]);
       setStructured(null);
       setSaved(null);
+      setBudgetExceeded(null);
     }
     setError(null);
     setMessage('');
@@ -274,6 +291,10 @@ export function useGeneration() {
             case 'stage':
               setMessage((data as { message: string }).message);
               break;
+            case 'budget-exceeded':
+              setBudgetExceeded(data as BudgetExceededInfo);
+              setStatus('done');
+              break;
             case 'paused':
               setStatus('paused');
               setMessage('');
@@ -326,6 +347,18 @@ export function useGeneration() {
     );
   }, [meta?.runId, start]);
 
+  /**
+   * 上下文超出预算后，用户确认保留全文，按同一请求重发一次。
+   *
+   * 重发时带上确认标记，服务端据此跳过裁剪，直接把完整上下文发出去。
+   */
+  const confirmBudgetAndRetry = useCallback(async () => {
+    const last = lastRequestRef.current;
+    if (!last) return;
+    setBudgetExceeded(null);
+    await start({ ...last, confirmOverBudget: true });
+  }, [start]);
+
   return {
     status,
     text,
@@ -340,11 +373,13 @@ export function useGeneration() {
     saved,
     message,
     error,
+    budgetExceeded,
     start,
     pause,
     resume,
     reset,
     setText,
+    confirmBudgetAndRetry,
     lastRequest: lastRequestRef,
   };
 }

@@ -24,6 +24,13 @@ export interface AppSettings {
   showStreamingRaw: boolean;
   /** 阅读正文时是否在角色发言前显示角色名 */
   showSpeakerName: boolean;
+  /**
+   * 界面字号缩放倍率。
+   *
+   * 驱动根节点字号，全站以 rem 计量的文字与间距会等比缩放。
+   * 默认略大于 1，因为原始基准在常见显示器上偏小。
+   */
+  uiFontScale: number;
 }
 
 export const DEFAULT_BUDGET: ContextBudget = {
@@ -66,7 +73,11 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   readerWidth: 46,
   showStreamingRaw: false,
   showSpeakerName: true,
+  uiFontScale: 1.15,
 };
+
+/** 界面字号的可调区间。 */
+export const UI_FONT_SCALE_RANGE = { min: 0.85, max: 1.4 } as const;
 
 function readSettingsMap(): Record<string, unknown> {
   const rows = getDb().prepare('SELECT key, value FROM app_settings').all() as Array<{

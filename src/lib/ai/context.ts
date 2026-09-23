@@ -80,6 +80,13 @@ export interface BuildContextOptions {
   queryResults?: Record<string, string>;
   /** 额外需要注入的百科条目名称 */
   focusTerms?: string[];
+  /**
+   * 是否允许按预算裁剪各层内容，默认允许。
+   *
+   * 置为 false 时各层保留完整内容，仅用于用户在界面上确认
+   * 「保留全文继续发送」之后的这一次请求。
+   */
+  allowTrim?: boolean;
 }
 
 /* ---------------------------------------------------------- 基础渲染 */
@@ -282,6 +289,9 @@ export function lookupSettings(novelId: string, keywords: string[]): Encyclopedi
             tags: character.tags,
             sourceChapterId: null,
             sortNo: character.sortNo,
+            // 人物不是百科条目，没有版本概念，填占位值仅供检索结果呈现
+            activeVersionNo: 0,
+            versionCount: 0,
             createdAt: character.createdAt,
             updatedAt: character.updatedAt,
           },
@@ -305,6 +315,9 @@ export function lookupSettings(novelId: string, keywords: string[]): Encyclopedi
             tags: [],
             sourceChapterId: event.chapterId,
             sortNo: event.orderNo,
+            // 事件也不是百科条目，同样填占位值
+            activeVersionNo: 0,
+            versionCount: 0,
             createdAt: event.createdAt,
             updatedAt: event.updatedAt,
           },
@@ -373,6 +386,7 @@ function renderRules(preferences: NovelPreferences): string {
 export function buildContext(novelId: string, options: BuildContextOptions = {}): ContextBundle {
   const preferences = getNovelPreferences(novelId);
   const budget = preferences.budget ?? DEFAULT_PREFERENCES.budget;
+  const allowTrim = options.allowTrim !== false;
   const chapters = listChapters(novelId);
   const characters = listCharacters(novelId);
 
@@ -397,7 +411,7 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
     const rawTokens = estimateTokens(content);
     let text = content;
     let trimmed = false;
-    if (rawTokens > limit) {
+    if (rawTokens > limit && allowTrim) {
       text = truncateToTokenBudget(content, limit);
       trimmed = true;
     }

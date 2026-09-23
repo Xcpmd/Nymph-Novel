@@ -16,9 +16,9 @@ import {
   TextArea,
   TextInput,
 } from '@/components/ui/primitives';
-import type { EncyclopediaEntry } from '@/lib/types';
+import type { EncyclopediaEntry, EncyclopediaVersion } from '@/lib/types';
 
-/** 百科全书。按分类生成目录，支持检索与编辑。 */
+/** 百科全书。按分类生成目录，支持检索与编辑，同一条目可保存多个版本。 */
 
 interface EncyclopediaPayload {
   entries: EncyclopediaEntry[];
@@ -48,6 +48,8 @@ export function EncyclopediaClient({ novelId }: { novelId: string }) {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<EncyclopediaEntry | null>(null);
   const [pendingDelete, setPendingDelete] = useState<EncyclopediaEntry | null>(null);
+  /** 当前编辑条目的版本历史，新的在前 */
+  const [versions, setVersions] = useState<EncyclopediaVersion[]>([]);
   const [form, setForm] = useState({ ...EMPTY_FORM });
 
   const load = useCallback(async () => {
@@ -109,6 +111,33 @@ export function EncyclopediaClient({ novelId }: { novelId: string }) {
       tags: entry.tags.join('，'),
     });
     setEditing(entry);
+    void loadVersions(entry.id);
+  };
+
+  /** 载入条目的版本历史，供切换启用版本。 */
+  const loadVersions = async (entryId: string) => {
+    try {
+      const result = await api.get<{ versions: EncyclopediaVersion[] }>(
+        `${novelResourcePath(novelId, 'encyclopedia-versions')}?entryId=${entryId}`,
+      );
+      setVersions(result.versions ?? []);
+    } catch {
+      setVersions([]);
+    }
+  };
+
+  /** 把某个版本设为启用。其余版本由服务端一并停用。 */
+  const activateVersion = async (versionId: string) => {
+    try {
+      await api.patch(novelResourcePath(novelId, 'encyclopedia-versions', versionId), {
+        action: 'activate',
+      });
+      toast.success(t('common.saved'));
+      if (editing) await loadVersions(editing.id);
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+    }
   };
 
   const submit = async () => {
@@ -241,6 +270,15 @@ export function EncyclopediaClient({ novelId }: { novelId: string }) {
                         {entry.aliases ? (
                           <span className="chip">{entry.aliases}</span>
                         ) : null}
+                        {entry.versionCount > 1 ? (
+                          <span
+                            className="chip"
+                            title={t('encyclopedia.versionHint')}
+                          >
+                            <i className="fa-solid fa-code-branch text-[0.62rem]" aria-hidden />
+                            {entry.activeVersionNo}/{entry.versionCount}
+                          </span>
+                        ) : null}
                       </div>
                       {entry.summary ? (
                         <p className="mt-1.5 text-xs leading-relaxed text-ink-muted">
@@ -355,6 +393,52 @@ export function EncyclopediaClient({ novelId }: { novelId: string }) {
               onChange={(event) => setForm({ ...form, tags: event.target.value })}
             />
           </Field>
+
+          {/*
+            版本历史。同名条目再次登记会在这里留下新版本，
+            只有启用的一版会进入给模型的上下文，因此可以放心回退。
+          */}
+          {editing && versions.length > 0 ? (
+            <div className="flex flex-col gap-2 rounded-[10px] border border-[var(--glass-border)] p-3">
+              <p className="panel-title">{t('encyclopedia.versions')}</p>
+              <ul className="flex flex-col gap-1.5">
+                {versions.map((version) => (
+                  <li
+                    key={version.id}
+                    className="flex flex-wrap items-center gap-2 rounded-[6px] px-2 py-1.5"
+                    style={
+                      version.isActive
+                        ? { background: 'var(--accent-soft)' }
+                        : undefined
+                    }
+                  >
+                    <span className="text-[0.78rem] font-semibold">
+                      v{version.versionNo}
+                    </span>
+                    <span className="chip">
+                      {version.origin === 'ai'
+                        ? t('encyclopedia.originAi')
+                        : t('encyclopedia.originManual')}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[0.72rem] text-ink-muted">
+                      {version.summary || version.content.slice(0, 40)}
+                    </span>
+                    {version.isActive ? (
+                      <span className="chip chip-accent">{t('encyclopedia.versionActive')}</span>
+                    ) : (
+                      <Button size="sm" onClick={() => void activateVersion(version.id)}>
+                        <i className="fa-solid fa-check" aria-hidden />
+                        {t('encyclopedia.versionUse')}
+                      </Button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              <p className="text-[0.72rem] leading-relaxed text-ink-faint">
+                {t('encyclopedia.versionHint')}
+              </p>
+            </div>
+          ) : null}
         </div>
       </Modal>
 

@@ -20,6 +20,7 @@ import {
 import { MarkdownEditor } from '@/components/markdown/MarkdownEditor';
 import { MarkdownView } from '@/components/markdown/MarkdownView';
 import { ImmersiveReader } from './ImmersiveReader';
+import { BudgetConfirmPrompt } from './BudgetConfirmPrompt';
 import { useGeneration } from '@/hooks/useGeneration';
 import { buildSpeakerColors } from '@/lib/markdown/speakers';
 import { countWords } from '@/lib/token';
@@ -76,6 +77,27 @@ export function ChapterDetailClient({
 
   /** 角色发言配色表，取自角色图鉴，正文里的对白按它染色 */
   const speakerColors = useMemo(() => buildSpeakerColors(characters), [characters]);
+
+  /*
+   * 沉浸模式与地址栏的 #immersive 保持同步。
+   *
+   * 这样直接带锚点打开链接就能进入沉浸阅读，刷新也不会掉出来；
+   * 用 replaceState 而不是 pushState，避免每进出一次就多一条历史记录。
+   */
+  const setImmersiveMode = useCallback((next: boolean) => {
+    setImmersive(next);
+    const { pathname, search } = window.location;
+    window.history.replaceState(
+      null,
+      '',
+      next ? `${pathname}${search}#immersive` : `${pathname}${search}`,
+    );
+  }, []);
+
+  useEffect(() => {
+    setImmersive(window.location.hash === '#immersive');
+  }, []);
+
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -263,6 +285,9 @@ export function ChapterDetailClient({
         </div>
       </header>
 
+      {/* 上下文超出预算时，先在这里由用户决定是否保留全文发送 */}
+      <BudgetConfirmPrompt generation={generation} />
+
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="flex flex-col gap-4">
           <Panel title={t('chapters.editContent')}>
@@ -422,7 +447,7 @@ export function ChapterDetailClient({
                     ? t('chapters.hideSpeakerName')
                     : t('chapters.showSpeakerName')}
                 </Button>
-                <Button size="sm" variant="primary" onClick={() => setImmersive(true)}>
+                <Button size="sm" variant="primary" onClick={() => setImmersiveMode(true)}>
                   <i className="fa-solid fa-book-open-reader" aria-hidden />
                   {t('chapters.immersive')}
                 </Button>
@@ -561,7 +586,7 @@ export function ChapterDetailClient({
           title={chapter?.title ?? ''}
           content={content}
           speakers={speakerColors}
-          onClose={() => setImmersive(false)}
+          onClose={() => setImmersiveMode(false)}
         />
       ) : null}
     </div>

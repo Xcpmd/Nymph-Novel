@@ -24,6 +24,18 @@ import type { CoverFit, Novel } from '@/lib/types';
 
 const EMOJI_CHOICES = ['📖', '🐉', '⚔️', '🌊', '🌌', '🕯️', '🧭', '🍶', '🌸', '🔥', '🪶', '🗺️'];
 
+/**
+ * 把时间戳格式化为 年-月-日。
+ *
+ * 封面悬浮层空间有限，用固定宽度的数字格式比相对时间更易扫读。
+ */
+function formatDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (input: number) => String(input).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
 type SortKey = 'updated' | 'title' | 'words';
 
 /**
@@ -299,67 +311,82 @@ export function ShelfClient({ initialNovels }: { initialNovels: Novel[] }) {
           />
         </Panel>
       ) : (
-        <ul className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <ul className="grid grid-cols-[repeat(auto-fill,minmax(10.5rem,1fr))] gap-x-5 gap-y-6">
           {sorted.map((novel) => (
-            <li key={novel.id} className="card card-hover animate-rise flex flex-col gap-3 p-4">
-              <div className="flex items-start gap-3">
+            <li key={novel.id} className="cover-group animate-rise">
+              {/*
+                常态只呈现封面。书名、作者、章数与更新日期收进悬浮层，
+                鼠标移入后才从底部渐变里浮出。
+              */}
+              <Link href={`/novels/${novel.id}`} className="cover-card" title={novel.title}>
+                {novel.coverImage ? (
+                  <>
+                    {/* 完整显示时先垫一层模糊放大的原图，补满留白 */}
+                    {novel.coverFit === 'contain' ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={novel.coverImage}
+                        alt=""
+                        aria-hidden
+                        className="cover-card-blur"
+                      />
+                    ) : null}
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={novel.coverImage}
+                      alt={novel.title}
+                      className="cover-card-media"
+                      style={{ objectFit: novel.coverFit === 'contain' ? 'contain' : 'cover' }}
+                    />
+                  </>
+                ) : (
+                  <span className="cover-card-fallback" aria-hidden>
+                    {novel.coverEmoji}
+                  </span>
+                )}
+
+                <span className="cover-card-veil" aria-hidden />
+
+                <div className="cover-card-info">
+                  <p className="truncate text-sm font-semibold">{novel.title}</p>
+                  <p className="mt-0.5 truncate text-[0.7rem] text-white/75">
+                    {novel.author || t('shelf.author')} · {novel.chapterCount}
+                    {t('shelf.chaptersCount')}
+                  </p>
+                  <p className="mt-0.5 text-[0.62rem] text-white/55">
+                    {formatDate(novel.updatedAt)}
+                  </p>
+                </div>
+              </Link>
+
+              {/*
+                操作按钮与封面互为兄弟节点而非嵌套：
+                链接里不能再放按钮，因此统一由外层的封面组承接悬停态。
+              */}
+              <div className="cover-card-actions">
+                <Link
+                  href={`/novels/${novel.id}/workbench`}
+                  className="cover-card-action"
+                  title={t('shelf.continueWriting')}
+                  aria-label={t('shelf.continueWriting')}
+                >
+                  <i className="fa-solid fa-wand-magic-sparkles" aria-hidden />
+                </Link>
                 <button
                   type="button"
+                  className="cover-card-action"
                   onClick={() => openCoverEdit(novel)}
-                  className="group relative shrink-0"
                   title={t('shelf.editCover')}
                   aria-label={t('shelf.editCover')}
                 >
-                  <NovelCover novel={novel} />
-                  <span className="absolute inset-0 flex items-center justify-center rounded-[12px] bg-black/45 text-xs text-white opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-                    <i className="fa-solid fa-camera" aria-hidden />
-                  </span>
+                  <i className="fa-solid fa-camera" aria-hidden />
                 </button>
-                <div className="min-w-0 flex-1">
-                  <Link
-                    href={`/novels/${novel.id}`}
-                    className="block truncate text-[0.95rem] font-semibold text-soft transition-colors duration-200 hover:text-accent-strong"
-                  >
-                    {novel.title}
-                  </Link>
-                  <p className="mt-0.5 truncate text-xs text-ink-muted">
-                    {novel.author || t('shelf.author')}
-                    {novel.genre ? ` · ${novel.genre}` : ''}
-                  </p>
-                </div>
-                <span className={clsx('chip shrink-0')}>{t(`shelf.status.${novel.status}`)}</span>
-              </div>
-
-              <p className="line-clamp-2 min-h-[2.6em] text-xs leading-relaxed text-ink-muted">
-                {novel.summary || t('shelf.noSummary')}
-              </p>
-
-              <div className="flex flex-wrap gap-1.5 text-[0.7rem]">
-                <span className="chip">
-                  {novel.volumeCount} {t('shelf.volumesCount')}
-                </span>
-                <span className="chip">
-                  {novel.chapterCount} {t('shelf.chaptersCount')}
-                </span>
-                <span className="chip">
-                  {novel.wordCount.toLocaleString('zh-Hans-CN')} {t('shelf.wordsCount')}
-                </span>
-              </div>
-
-              <div className="mt-auto flex items-center gap-2 pt-1">
-                <Link href={`/novels/${novel.id}/workbench`} className="btn btn-primary flex-1">
-                  <i className="fa-solid fa-wand-magic-sparkles" aria-hidden />
-                  {t('shelf.continueWriting')}
-                </Link>
-                <Link href={`/novels/${novel.id}`} className="btn">
-                  {t('shelf.openNovel')}
-                </Link>
                 <button
                   type="button"
-                  className="btn btn-danger px-2"
+                  className="cover-card-action cover-card-action-danger"
                   onClick={() => setPendingDelete(novel)}
-                  aria-label={t('shelf.deleteNovel')}
                   title={t('shelf.deleteNovel')}
+                  aria-label={t('shelf.deleteNovel')}
                 >
                   <i className="fa-solid fa-trash-can" aria-hidden />
                 </button>

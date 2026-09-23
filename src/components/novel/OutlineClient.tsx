@@ -12,11 +12,13 @@ import {
   EmptyState,
   Field,
   Panel,
-  Select,
   Spinner,
+  Select,
   TextArea,
   TextInput,
 } from '@/components/ui/primitives';
+import { useGeneration } from '@/hooks/useGeneration';
+import { BudgetConfirmPrompt } from './BudgetConfirmPrompt';
 import type { OutlineKind, OutlineNode, OutlineStatus } from '@/lib/types';
 
 /** 大纲编辑器。支持逐级展开、增删改与同级排序。 */
@@ -40,6 +42,12 @@ export function OutlineClient({ novelId }: { novelId: string }) {
   const [editing, setEditing] = useState<OutlineNode | null>(null);
   const [parentForNew, setParentForNew] = useState<string | null | undefined>(undefined);
   const [pendingDelete, setPendingDelete] = useState<OutlineNode | null>(null);
+  /** 正在用 AI 撰写内容的节点 */
+  const [aiNode, setAiNode] = useState<OutlineNode | null>(null);
+  /** 交给模型的补充要求 */
+  const [aiAsk, setAiAsk] = useState('');
+
+  const generation = useGeneration();
   const [savingOverview, setSavingOverview] = useState(false);
 
   const [form, setForm] = useState<{ title: string; content: string; kind: OutlineKind; status: OutlineStatus }>({
@@ -93,6 +101,50 @@ export function OutlineClient({ novelId }: { novelId: string }) {
         });
         setParentForNew(undefined);
       }
+      toast.success(t('common.saved'));
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+    }
+  };
+
+  /*
+   * 用 AI 撰写节点内容。
+   *
+   * 节点信息经 instruction 一并交给模型：提示词模板里没有为节点准备独立变量，
+   * 与其为此扩展上下文变量表，不如在这里拼装，模板保持通用。
+   */
+  const openNodeAi = (node: OutlineNode) => {
+    setAiNode(node);
+    setAiAsk('');
+  };
+
+  const runNodeAi = async () => {
+    if (!aiNode) return;
+    const instruction = [
+      `节点标题：${aiNode.title}`,
+      `节点类型：${t(`outline.kind${aiNode.kind === 'arc' ? 'Arc' : aiNode.kind === 'beat' ? 'Beat' : 'Sub'}`)}`,
+      `节点现有内容：${aiNode.content || '（空）'}`,
+      aiAsk.trim() ? `补充要求：${aiAsk.trim()}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    await generation.start({
+      novelId,
+      taskType: 'outline_node_write',
+      instruction,
+    });
+  };
+
+  /** 把生成结果写入节点内容。 */
+  const applyNodeResult = async () => {
+    if (!aiNode) return;
+    const text = generation.text.trim();
+    if (!text) return;
+    try {
+      await api.patch(novelResourcePath(novelId, 'outline', aiNode.id), { content: text });
+      setAiNode(null);
+      setAiAsk('');
       toast.success(t('common.saved'));
       await load();
     } catch (error) {
@@ -214,12 +266,21 @@ export function OutlineClient({ novelId }: { novelId: string }) {
                 >
                   <i className="fa-solid fa-plus text-[0.7rem]" aria-hidden />
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost px-1.5 py-1"
-                  onClick={() => openEdit(node)}
-                  aria-label={t('common.edit')}
-                >
+                  <button
+                    type="button"
+                    className="btn btn-ghost px-1.5 py-1"
+                    onClick={() => openNodeAi(node)}
+                    aria-label={t('outline.nodeAi')}
+                    title={t('outline.nodeAi')}
+                  >
+                    <i className="fa-solid fa-wand-magic-sparkles text-[0.7rem]" aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost px-1.5 py-1"
+                    onClick={() => openEdit(node)}
+                    aria-label={t('common.edit')}
+                  >
                   <i className="fa-solid fa-pen text-[0.7rem]" aria-hidden />
                 </button>
                 <button
@@ -297,6 +358,71 @@ export function OutlineClient({ novelId }: { novelId: string }) {
           renderNodes(tree)
         )}
       </Panel>
+
+      <Modal
+        open={aiNode !== null}
+        title={`${t('outline.nodeAi')}：${aiNode?.title ?? ''}`}
+        description={t('outline.nodeAiHint')}
+        size="lg"
+        onClose={() => setAiNode(null)}
+        footer={
+          <>
+            <Button onClick={() => setAiNode(null)}>{t('common.cancel')}</Button>
+            <Button
+              variant="primary"
+              onClick={applyNodeResult}
+              disabled={!generation.text.trim()}
+            >
+              <i className="fa-solid fa-check" aria-hidden />
+              {t('common.apply')}
+            </Button>
+          </>
+        }
+      >
+        <div className="grid gap-3.5">
+          <Field label={t('outline.nodeAiAsk')}>
+            <TextArea
+              rows={3}
+              value={aiAsk}
+              onChange={(event) => setAiAsk(event.target.value)}
+              placeholder={t('outline.nodeAiAskPlaceholder')}
+            />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="primary"
+              onClick={() => void runNodeAi()}
+              disabled={generation.status === 'running'}
+            >
+              {generation.status === 'running' ? (
+                <Spinner />
+              ) : (
+                <i className="fa-solid fa-wand-magic-sparkles" aria-hidden />
+              )}
+              {t('common.generate')}
+            </Button>
+            {generation.status === 'running' ? (
+              <Button onClick={generation.pause}>
+                <i className="fa-solid fa-pause" aria-hidden />
+                {t('workbench.chapterPause')}
+              </Button>
+            ) : null}
+          </div>
+          <BudgetConfirmPrompt generation={generation} />
+          {generation.error ? (
+            <p className="rounded-[6px] bg-danger-soft px-3 py-2 text-xs leading-relaxed text-danger">
+              {generation.error}
+            </p>
+          ) : null}
+          {generation.text ? (
+            <div className="card max-h-80 overflow-y-auto px-4 py-3">
+              <p className="whitespace-pre-wrap text-xs leading-relaxed">{generation.text}</p>
+            </div>
+          ) : (
+            <p className="text-xs text-ink-faint">{t('workbench.streamIdle')}</p>
+          )}
+        </div>
+      </Modal>
 
       <Modal
         open={editing !== null || parentForNew !== undefined}

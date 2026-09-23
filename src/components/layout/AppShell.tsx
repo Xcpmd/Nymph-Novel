@@ -8,6 +8,7 @@ import { api } from '@/lib/client/api';
 import { useSettings } from '@/components/providers/SettingsProvider';
 import { ThemeToggle } from '@/components/layout/ThemeToggle';
 import { FluidBackdrop } from '@/components/layout/FluidBackdrop';
+import { RequestLogPanel } from '@/components/layout/RequestLogPanel';
 import { SettingsDialog } from '@/components/settings/SettingsDialog';
 import type { Novel } from '@/lib/types';
 
@@ -168,6 +169,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       </main>
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      {/* 请求日志常驻右下角，仅在小说页面内可用，日志本身按小说归属 */}
+      {activeNovelId ? <RequestLogPanel novelId={activeNovelId} /> : null}
     </div>
   );
 }

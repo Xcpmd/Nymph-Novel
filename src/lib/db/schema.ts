@@ -9,6 +9,14 @@ export interface Migration {
   version: number;
   name: string;
   statements: string[];
+  /**
+   * 需要判断后再执行的迁移步骤，在全部语句之后运行。
+   *
+   * SQLite 有一批操作无法写成幂等语句，例如 ALTER TABLE ADD COLUMN
+   * 在列已存在时会直接报错，而迁移可能被多个版本的程序各跑一次。
+   * 这类步骤放在这里，由代码检查现状后再决定是否执行。
+   */
+  run?: (db: import('better-sqlite3').Database) => void;
 }
 
 export const MIGRATIONS: Migration[] = [
@@ -443,5 +451,96 @@ export const MIGRATIONS: Migration[] = [
       `UPDATE chapters SET rel_path = REPLACE(rel_path, '/章-', '/ch-') WHERE rel_path LIKE '%/章-%'`,
       `UPDATE chapters SET rel_path = REPLACE(rel_path, '/正文.md', '/content.md') WHERE rel_path LIKE '%/正文.md'`,
     ],
+  },
+  {
+    version: 8,
+    name: '百科条目改为多版本',
+    statements: [
+      /*
+       * 条目与正文分离：条目只承载名称、分类与别名这类身份信息，
+       * 正文落进独立的版本表，一次登记就是一条版本记录。
+       * 这样同名条目不必重复建，也能保留被替换掉的旧稿。
+       */
+      `CREATE TABLE IF NOT EXISTS encyclopedia_versions (
+         id TEXT PRIMARY KEY,
+         entry_id TEXT NOT NULL,
+         novel_id TEXT NOT NULL,
+         version_no INTEGER NOT NULL,
+         summary TEXT NOT NULL DEFAULT '',
+         content TEXT NOT NULL DEFAULT '',
+         tags TEXT NOT NULL DEFAULT '[]',
+         source_chapter_id TEXT,
+         origin TEXT NOT NULL DEFAULT 'manual',
+         is_active INTEGER NOT NULL DEFAULT 0,
+         created_at TEXT NOT NULL,
+         updated_at TEXT NOT NULL,
+         FOREIGN KEY (entry_id) REFERENCES encyclopedia_entries(id) ON DELETE CASCADE,
+         FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
+         UNIQUE (entry_id, version_no)
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_encyclopedia_versions_entry ON encyclopedia_versions(entry_id, version_no)`,
+
+      /*
+       * 把既有条目的正文搬成它的第一版，并直接启用。
+       * 用 NOT EXISTS 判断，重复执行不会重复搬。
+       */
+      `INSERT INTO encyclopedia_versions (id, entry_id, novel_id, version_no, summary, content, tags, source_chapter_id, origin, is_active, created_at, updated_at)
+       SELECT 'encv_' || e.id, e.id, e.novel_id, 1, e.summary, e.content, e.tags, e.source_chapter_id, 'manual', 1, e.created_at, e.updated_at
+       FROM encyclopedia_entries e
+       WHERE NOT EXISTS (SELECT 1 FROM encyclopedia_versions v WHERE v.entry_id = e.id)`,
+
+      /*
+       * 旧列不再读写，清空以免与版本表并存两份内容造成歧义。
+       * 这里不用 DROP COLUMN：SQLite 的列删除无法写成幂等语句，
+       * 而迁移可能被多个版本的程序各跑一次。
+       */
+      `UPDATE encyclopedia_entries SET summary = '', content = '', tags = '[]', source_chapter_id = NULL
+       WHERE EXISTS (SELECT 1 FROM encyclopedia_versions v WHERE v.entry_id = encyclopedia_entries.id)`,
+    ],
+  },
+  {
+    version: 9,
+    name: '废案单独记录原序号',
+    statements: [],
+    run: (db) => {
+      /*
+       * 废案原先把原位置编码进 index_no：index_no = -(偏移量 + 原序号)。
+       * 同一卷内若有两个章节先后从同一个位置被废，算出的负数完全相同，
+       * 会被 (volume_id, index_no) 唯一约束挡下，导致第二次设为废案失败。
+       *
+       * 改为单独记录原序号，index_no 只负责保证唯一。
+       */
+      const columns = db.prepare('PRAGMA table_info(chapters)').all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'original_index_no')) {
+        db.exec('ALTER TABLE chapters ADD COLUMN original_index_no INTEGER');
+      }
+      // 历史废章没有这一列的值，回填时用原有的编码规则反推
+      db.exec(
+        `UPDATE chapters SET original_index_no = -(index_no + 100000)
+         WHERE index_no <= -100000 AND original_index_no IS NULL`,
+      );
+    },
+  },
+  {
+    version: 10,
+    name: '生成任务记录补全请求与用量',
+    statements: [],
+    run: (db) => {
+      /*
+       * 请求日志要能看到实际发出去的消息与本次用量，
+       * 原表只存了请求参数与输出，缺少这两项。
+       * 加列不是幂等语句，先查表结构再决定是否执行。
+       */
+      const columns = db.prepare('PRAGMA table_info(generation_runs)').all() as Array<{
+        name: string;
+      }>;
+      const has = (name: string) => columns.some((column) => column.name === name);
+      if (!has('prompt_text')) {
+        db.exec(`ALTER TABLE generation_runs ADD COLUMN prompt_text TEXT NOT NULL DEFAULT ''`);
+      }
+      if (!has('usage_json')) {
+        db.exec(`ALTER TABLE generation_runs ADD COLUMN usage_json TEXT NOT NULL DEFAULT ''`);
+      }
+    },
   },
 ];

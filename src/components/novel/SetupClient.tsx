@@ -4,7 +4,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, novelResourcePath } from '@/lib/client/api';
 import { useSettings } from '@/components/providers/SettingsProvider';
 import { useToast } from '@/components/ui/Toast';
-import { Button, Field, Panel, Spinner, TextArea, TextInput, Toggle } from '@/components/ui/primitives';
+import { Modal } from '@/components/ui/Modal';
+import {
+  Button,
+  Field,
+  Panel,
+  Spinner,
+  TextArea,
+  TextInput,
+  Toggle,
+} from '@/components/ui/primitives';
+import { useGeneration } from '@/hooks/useGeneration';
+import { BudgetConfirmPrompt } from './BudgetConfirmPrompt';
 import type { ContextBudget, GenerationRules, NovelPreferences } from '@/lib/types';
 
 /** 设定与生成规则。这两部分属于始终注入层，会随每次生成一起发送给模型。 */
@@ -40,6 +51,13 @@ const BUDGET_FIELDS: Array<[keyof ContextBudget, string]> = [
 export function SetupClient({ novelId }: { novelId: string }) {
   const { t } = useSettings();
   const toast = useToast();
+
+  /** 整本书大纲的 AI 修改弹窗 */
+  const [overviewAiOpen, setOverviewAiOpen] = useState(false);
+  /** 交给模型的修改要求 */
+  const [overviewAsk, setOverviewAsk] = useState('');
+
+  const generation = useGeneration();
 
   const [texts, setTexts] = useState(EMPTY_TEXTS);
   const [preferences, setPreferences] = useState<NovelPreferences | null>(null);
@@ -160,6 +178,36 @@ export function SetupClient({ novelId }: { novelId: string }) {
     [],
   );
 
+  /*
+   * 整本书大纲的 AI 修改。
+   *
+   * 结果先展示在弹窗里，确认后才写入大纲总纲：
+   * 模型的输出未必一次到位，直接覆盖会丢掉用户原有的内容。
+   */
+  const runOverviewAi = async () => {
+    if (!overviewAsk.trim()) {
+      toast.error(t('common.required'));
+      return;
+    }
+    await generation.start({
+      novelId,
+      taskType: 'outline_overview_revise',
+      instruction: overviewAsk,
+    });
+  };
+
+  const applyOverviewResult = async () => {
+    const text = generation.text.trim();
+    if (!text) return;
+    // 同时更新 ref 与 state：保存逻辑读的是 ref，晚一步就会写回旧内容
+    const nextTexts = { ...liveRef.current.texts, outlineOverview: text };
+    liveRef.current = { ...liveRef.current, texts: nextTexts };
+    setTexts(nextTexts);
+    setOverviewAiOpen(false);
+    setOverviewAsk('');
+    await save();
+  };
+
   const patchRules = (patch: Partial<GenerationRules>) => {
     setPreferences((current) => (current ? { ...current, rules: { ...current.rules, ...patch } } : current));
   };
@@ -228,7 +276,16 @@ export function SetupClient({ novelId }: { novelId: string }) {
           />
         </Panel>
 
-        <Panel title={t('setup.outlineOverview')} description={t('setup.outlineOverviewHint')}>
+        <Panel
+          title={t('setup.outlineOverview')}
+          description={t('setup.outlineOverviewHint')}
+          actions={
+            <Button size="sm" onClick={() => setOverviewAiOpen(true)}>
+              <i className="fa-solid fa-wand-magic-sparkles" aria-hidden />
+              {t('setup.outlineOverviewAi')}
+            </Button>
+          }
+        >
           <TextArea
             rows={6}
             value={texts.outlineOverview}
@@ -451,6 +508,69 @@ export function SetupClient({ novelId }: { novelId: string }) {
           </Button>
         </div>
       </div>
+      <Modal
+        open={overviewAiOpen}
+        title={t('setup.outlineOverviewAi')}
+        description={t('setup.outlineOverviewAiHint')}
+        size="xl"
+        onClose={() => setOverviewAiOpen(false)}
+        footer={
+          <>
+            <Button onClick={() => setOverviewAiOpen(false)}>{t('common.cancel')}</Button>
+            <Button
+              variant="primary"
+              onClick={applyOverviewResult}
+              disabled={!generation.text.trim()}
+            >
+              <i className="fa-solid fa-check" aria-hidden />
+              {t('common.apply')}
+            </Button>
+          </>
+        }
+      >
+        <div className="grid gap-3.5">
+          <Field label={t('workbench.outlineRevise')} hint={t('workbench.outlineRevisePlaceholder')}>
+            <TextArea
+              rows={3}
+              value={overviewAsk}
+              onChange={(event) => setOverviewAsk(event.target.value)}
+            />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="primary"
+              onClick={() => void runOverviewAi()}
+              disabled={generation.status === 'running'}
+            >
+              {generation.status === 'running' ? (
+                <Spinner />
+              ) : (
+                <i className="fa-solid fa-wand-magic-sparkles" aria-hidden />
+              )}
+              {t('workbench.outlineGenerate')}
+            </Button>
+            {generation.status === 'running' ? (
+              <Button onClick={generation.pause}>
+                <i className="fa-solid fa-pause" aria-hidden />
+                {t('workbench.chapterPause')}
+              </Button>
+            ) : null}
+          </div>
+          <BudgetConfirmPrompt generation={generation} />
+          {generation.error ? (
+            <p className="rounded-[6px] bg-danger-soft px-3 py-2 text-xs leading-relaxed text-danger">
+              {generation.error}
+            </p>
+          ) : null}
+          {generation.text ? (
+            <div className="card max-h-96 overflow-y-auto px-4 py-3">
+              <p className="whitespace-pre-wrap text-xs leading-relaxed">{generation.text}</p>
+            </div>
+          ) : (
+            <p className="text-xs text-ink-faint">{t('workbench.streamIdle')}</p>
+          )}
+        </div>
+      </Modal>
     </div>
   );
 }

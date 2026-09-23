@@ -5,7 +5,7 @@
 
 export type NovelStatus = 'drafting' | 'ongoing' | 'paused' | 'finished';
 
-export type ChapterStatus = 'planned' | 'drafting' | 'generated' | 'revised';
+export type ChapterStatus = 'planned' | 'drafting' | 'generated' | 'revised' | 'scrapped';
 
 export type CharacterRole = 'protagonist' | 'supporting' | 'antagonist' | 'minor' | 'extra';
 
@@ -61,6 +61,8 @@ export interface Chapter {
   branchId: string | null;
   direction: string;
   notes: string;
+  /** 设为废案前的序号。还原时据此回到原位置，正常章节为 null */
+  originalIndexNo: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -155,11 +157,38 @@ export interface EncyclopediaEntry {
   category: string;
   name: string;
   aliases: string;
+  /** 当前启用版本的摘要。条目本身不存正文，正文按版本保存。 */
   summary: string;
   content: string;
   tags: string[];
   sourceChapterId: string | null;
   sortNo: number;
+  /** 当前启用的版本号，没有任何版本时为 0 */
+  activeVersionNo: number;
+  /** 该条目累计的版本数 */
+  versionCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * 百科条目的一个版本。
+ *
+ * 同名条目再次登记时不建重复条目，而是追加一条版本记录；
+ * 只有处于启用状态的版本会进入给模型的上下文。
+ */
+export interface EncyclopediaVersion {
+  id: string;
+  entryId: string;
+  novelId: string;
+  versionNo: number;
+  summary: string;
+  content: string;
+  tags: string[];
+  sourceChapterId: string | null;
+  /** 版本来源：ai 为模型抽取，manual 为用户填写 */
+  origin: 'ai' | 'manual';
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -327,6 +356,8 @@ export type TaskType =
   | 'direction'
   | 'outline'
   | 'outline_revise'
+  | 'outline_overview_revise'
+  | 'outline_node_write'
   | 'chapter'
   | 'chapter_revise'
   | 'character_extract'

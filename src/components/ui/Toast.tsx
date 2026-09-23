@@ -45,7 +45,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      <div className="pointer-events-none fixed bottom-5 right-5 z-[60] flex w-[min(92vw,22rem)] flex-col gap-2">
+      {/* 上移一档，给右下角的请求日志按钮让出位置 */}
+      <div className="pointer-events-none fixed right-5 bottom-20 z-[60] flex w-[min(92vw,22rem)] flex-col gap-2">
         {items.map((item) => (
           <div
             key={item.id}
