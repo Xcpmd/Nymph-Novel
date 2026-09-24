@@ -543,4 +543,49 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 11,
+    name: '废案章序号归入负数保留区',
+    statements: [],
+    run: (db) => {
+      /*
+       * 废案章的序号本应落在负数保留区（小于等于负十万），与正常章的正序号互不干涉。
+       * 早期数据里它们仍停在正常序号段，于是重排时正常章要写回的位置被它们占着，
+       * 一废案就撞 UNIQUE(volume_id, index_no)。这里按卷把它们重新编号到保留区。
+       *
+       * 数值与 SCRAPPED_INDEX_OFFSET 对应，迁移层不便反向依赖仓储层，因此就地写明。
+       */
+      const OFFSET = 100000;
+      const TEMP_BASE = 200000;
+
+      const volumes = db.prepare('SELECT DISTINCT volume_id FROM chapters').all() as Array<{
+        volume_id: string;
+      }>;
+      for (const { volume_id: volumeId } of volumes) {
+        const scrapped = db
+          .prepare(
+            `SELECT id FROM chapters
+             WHERE volume_id = ? AND status = 'scrapped'
+             ORDER BY index_no`,
+          )
+          .all(volumeId) as Array<{ id: string }>;
+        if (scrapped.length === 0) continue;
+
+        // 先整体挪到临时区，避开两批目标序号交叉时中途撞车
+        scrapped.forEach((row, position) => {
+          db.prepare('UPDATE chapters SET index_no = ? WHERE id = ?').run(
+            -(TEMP_BASE + position + 1),
+            row.id,
+          );
+        });
+        // 再落到保留区，与原位置无关，原位置另有 original_index_no 记录
+        scrapped.forEach((row, position) => {
+          db.prepare('UPDATE chapters SET index_no = ? WHERE id = ?').run(
+            -(OFFSET + position + 1),
+            row.id,
+          );
+        });
+      }
+    },
+  },
 ];

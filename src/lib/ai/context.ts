@@ -3,6 +3,7 @@ import { readChapterContent } from '../store/chapter-files';
 import {
   getCurrentStoryEvent,
   getEncyclopediaCatalog,
+  getOutlineTree,
   getStoryEvent,
   listBranches,
   listCharacters,
@@ -26,6 +27,7 @@ import type {
   ContextBudget,
   EncyclopediaEntry,
   NovelPreferences,
+  OutlineNode,
   StoryEvent,
   TimelineEvent,
 } from '../types';
@@ -63,6 +65,34 @@ export interface ContextBundle {
   citations: Array<{ kind: string; id: string; label: string; tokens: number }>;
 }
 
+/**
+ * 上下文层的清单，供界面展示与勾选。
+ *
+ * key 必须与 buildContext 里 push 的第一个参数一致。
+ * 新增一层时两处一起补，否则界面上根本勾不到它。
+ */
+export const CONTEXT_LAYER_CATALOG: Array<{ key: string; label: string; note: string }> = [
+  { key: 'worldview', label: '设定与世界观', note: '作品的世界观设定正文' },
+  { key: 'setting', label: '核心设定补充', note: '补充性的核心设定' },
+  { key: 'style-sample', label: '文风样本', note: '示范段落，用于对齐文笔与叙事腔调' },
+  { key: 'outline-overview', label: '整本书大纲', note: '主线脉络，决定剧情走向' },
+  { key: 'outline-tree', label: '结构化大纲', note: '大纲页维护的篇章与节拍层级' },
+  { key: 'ending-plan', label: '结局与收束计划', note: '预定的结局与收束方式' },
+  { key: 'characters-primary', label: '主角与核心人物', note: '主角与关键角色的完整档案' },
+  { key: 'characters-secondary', label: '配角与次要人物', note: '次要角色的简要档案' },
+  { key: 'relations', label: '角色关系网', note: '人物之间的既有关系' },
+  { key: 'rules', label: '生成规则', note: '文风、人称、禁忌等硬性要求' },
+  { key: 'calendar', label: '小说内历法', note: '时间写法约定' },
+  { key: 'timeline', label: '时间轴', note: '已发生事件的时序' },
+  { key: 'encyclopedia-index', label: '百科条目索引', note: '条目的名称与分类，正文按需检索' },
+  { key: 'current-event', label: '当前事件大纲', note: '正在推进的事件大纲' },
+  { key: 'current-event-steps', label: '事件步骤与进度', note: '步骤清单与当前进度' },
+  { key: 'finished-events', label: '已完成事件大纲', note: '已收尾事件的大纲' },
+  { key: 'previous-chapter', label: '前一章全文', note: '上一章正文，用于承接语气' },
+  { key: 'encyclopedia', label: '百科检索结果', note: '按关键词检索到的条目正文' },
+  { key: 'recalled', label: '按需注入的往期正文', note: '模型主动调阅的历史片段' },
+];
+
 export interface BuildContextOptions {
   /** 当前正在处理的章节，会从往期注入中排除 */
   chapterId?: string;
@@ -87,6 +117,23 @@ export interface BuildContextOptions {
    * 「保留全文继续发送」之后的这一次请求。
    */
   allowTrim?: boolean;
+  /**
+   * 本次要注入的层，数组顺序即注入顺序。
+   *
+   * 留空表示全部启用并沿用默认顺序。传入非空数组时按白名单处理：
+   * 未列出的层既不出现在上下文里，也不会占用 token 预算。
+   *
+   * 各模板变量都从层内容取值，因此在这里过滤就能一路贯通到提示词，
+   * 不必再逐项清理变量。
+   */
+  layerKeys?: string[];
+  /**
+   * 本次要写第几步，从 0 开始。
+   *
+   * 缺省沿用事件的推进进度。允许指定是为了补写或跳写：
+   * 想回头补第 2 步，或先把高潮那一步写出来，都不必改动事件进度。
+   */
+  stepIndex?: number;
 }
 
 /* ---------------------------------------------------------- 基础渲染 */
@@ -96,9 +143,9 @@ function renderCharacter(character: Character, detailed: boolean): string {
     character.aliases.length > 0 ? `｜别名 ${character.aliases.join('、')}` : ''
   }`;
   if (!detailed) {
+    // 次要角色只给性格与能力，控制篇幅；其余字段留给按需检索
     const briefBits = [character.personality, character.ability].filter(Boolean).join('；');
-    const colorBit = character.speechColorMode === 'manual' ? '' : '';
-    return briefBits ? `- ${head}：${briefBits}${colorBit}` : `- ${head}`;
+    return briefBits ? `- ${head}：${briefBits}` : `- ${head}`;
   }
   const lines = [`### ${head}`];
   const push = (label: string, value: string) => {
@@ -111,6 +158,8 @@ function renderCharacter(character: Character, detailed: boolean): string {
   push('能力体系', character.ability);
   push('背景', character.background);
   push('成长线', character.arc);
+  // 标签能概括戏份定位（例如「宿敌」「导师」），一并送出
+  if (character.tags.length > 0) lines.push(`- 标签：${character.tags.join('、')}`);
   if (character.foreshadowing.length > 0) {
     const items = character.foreshadowing
       .map((item) => `${item.title}｜${item.status}｜${item.detail}`)
@@ -143,6 +192,34 @@ function renderRelations(novelId: string): string {
       return `- ${from} 与 ${to}：${relation.kind}，${arrow}，密切程度 ${relation.strength}/5${label}`;
     })
     .join('\n');
+}
+
+/** 结构化大纲的层级标签。 */
+const OUTLINE_KIND_LABELS: Record<string, string> = {
+  arc: '篇章',
+  beat: '节拍',
+  sub: '子项',
+};
+
+/**
+ * 把结构化大纲渲染成缩进列表。
+ *
+ * 大纲页维护的节点树原先只用于页面展示，生成时完全读不到，
+ * 在那里排好的篇章与节拍等于白排。
+ */
+function renderOutlineTree(novelId: string): string {
+  const tree = getOutlineTree(novelId);
+  if (tree.length === 0) return '';
+  const lines: string[] = [];
+  const walk = (node: OutlineNode, depth: number) => {
+    const indent = '  '.repeat(depth);
+    const body = node.content.trim();
+    const label = OUTLINE_KIND_LABELS[node.kind] ?? node.kind;
+    lines.push(`${indent}- [${label}] ${node.title}${body ? `：${body}` : ''}`);
+    for (const child of node.children ?? []) walk(child, depth + 1);
+  };
+  for (const node of tree) walk(node, 0);
+  return lines.join('\n');
 }
 
 function renderTimeline(novelId: string): string {
@@ -207,11 +284,14 @@ function condenseOutline(outline: string): string {
 }
 
 /** 当前事件的步骤清单，标出每一步的完成状态。 */
-function renderEventSteps(event: StoryEvent): string {
+/** 渲染步骤清单。focusIndex 标记本次要写的那一步，缺省用事件进度。 */
+function renderEventSteps(event: StoryEvent, focusIndex?: number): string {
   if (event.steps.length === 0) return '本次事件尚未拆分步骤。';
+  const focus = focusIndex ?? event.progress;
   return event.steps
     .map((step, index) => {
-      const marker = index < event.progress ? '已完成' : index === event.progress ? '当前' : '未开始';
+      const marker =
+        index < focus ? '已完成' : index === focus ? '本次要写' : '未开始';
       const time = step.novelTime ? `时间 ${step.novelTime}｜` : '';
       const detail = step.detail ? `\n    说明：${step.detail}` : '';
       return `${index + 1}. [${marker}] ${time}${step.title}${detail}`;
@@ -387,6 +467,9 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
   const preferences = getNovelPreferences(novelId);
   const budget = preferences.budget ?? DEFAULT_PREFERENCES.budget;
   const allowTrim = options.allowTrim !== false;
+  /** 用户勾选的层。为空表示不设限，全部启用并沿用默认顺序。 */
+  const enabledKeys =
+    options.layerKeys && options.layerKeys.length > 0 ? new Set(options.layerKeys) : null;
   const chapters = listChapters(novelId);
   const characters = listCharacters(novelId);
 
@@ -397,6 +480,18 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
   const currentEvent = options.eventId
     ? getStoryEvent(options.eventId)
     : getCurrentStoryEvent(novelId);
+  /*
+   * 本次要写的步骤。
+   *
+   * 用户可以指定，缺省跟随事件进度。指定的意义在于补写与跳写：
+   * 回头补第 2 步，或先写高潮那一步，都不需要改动事件的进度记录。
+   */
+  const focusStep = currentEvent
+    ? Math.max(
+        0,
+        Math.min(options.stepIndex ?? currentEvent.progress, currentEvent.steps.length - 1),
+      )
+    : 0;
 
   const layers: ContextLayer[] = [];
   const citations: ContextBundle['citations'] = [];
@@ -407,7 +502,9 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
     content: string,
     limit: number,
     always: boolean,
-  ): ContextLayer => {
+  ): ContextLayer | null => {
+    // 未被勾选的层直接跳过，内容也就不会进入任何模板变量
+    if (enabledKeys && !enabledKeys.has(key)) return null;
     const rawTokens = estimateTokens(content);
     let text = content;
     let trimmed = false;
@@ -436,6 +533,17 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
     push('setting', '核心设定补充', setting, Math.floor(budget.always * 0.15), true);
   }
 
+  /*
+   * 文风样本。
+   *
+   * 这一项在设定页一直可以填写，但先前没有任何层承载它，
+   * 写进去的样章从未进入提示词，等于白填。
+   */
+  const styleSample = readNovelText(novelId, NOVEL_TEXT_KEYS.styleSample);
+  if (styleSample.trim()) {
+    push('style-sample', '文风样本', styleSample, Math.floor(budget.always * 0.2), true);
+  }
+
   // 第二层：整本书大纲与收束计划
   const outlineOverview = readNovelText(novelId, NOVEL_TEXT_KEYS.outlineOverview);
   const endingPlan = readNovelText(novelId, NOVEL_TEXT_KEYS.endingPlan);
@@ -446,6 +554,17 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
     Math.floor(budget.always * 0.2),
     true,
   );
+
+  /*
+   * 结构化大纲。
+   *
+   * 大纲页维护的篇章与节拍按层级列出，比一段连续文本更能说明编排意图。
+   * 没有维护过节点时不占位，免得白占预算。
+   */
+  const outlineTreeText = renderOutlineTree(novelId);
+  if (outlineTreeText) {
+    push('outline-tree', '结构化大纲', outlineTreeText, Math.floor(budget.outlines * 0.3), true);
+  }
   if (endingPlan.trim()) {
     push('ending-plan', '结局与收束计划', endingPlan, Math.floor(budget.always * 0.08), true);
   }
@@ -471,6 +590,14 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
 
   // 第五层：生成规则
   push('rules', '生成规则', renderRules(preferences), 1200, true);
+  // 历法单独成层：它是纯时间写法约定，篇幅小但影响全书一致性
+  push(
+    'calendar',
+    '小说内历法',
+    preferences.calendar || '尚未设定历法，时间按通用写法处理。',
+    400,
+    true,
+  );
 
   // 第六层：完整时间轴，供模型自主判断剧情相关性
   push('timeline', '时间轴', renderTimeline(novelId), Math.floor(budget.always * 0.28), true);
@@ -490,7 +617,7 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
   push(
     'current-event-steps',
     '事件步骤与进度',
-    currentEvent ? renderEventSteps(currentEvent) : '暂无事件步骤。',
+    currentEvent ? renderEventSteps(currentEvent, focusStep) : '暂无事件步骤。',
     Math.floor(budget.outlines * 0.2),
     true,
   );
@@ -589,16 +716,31 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
     false,
   );
 
+  /*
+   * 按用户指定的顺序排列各层。
+   *
+   * 顺序会一路影响到提示词：拼接型变量（例如 context）按层序取内容，
+   * 排在前面的层因此更容易被模型当作主线来读。
+   */
+  if (options.layerKeys && options.layerKeys.length > 0) {
+    const order = new Map(options.layerKeys.map((key, index) => [key, index]));
+    layers.sort(
+      (a, b) =>
+        (order.get(a.key) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.key) ?? Number.MAX_SAFE_INTEGER),
+    );
+  }
+
   const totalTokens = layers.reduce((sum, layer) => sum + layer.tokens, 0);
   const branchNames = listBranches(novelId).map((branch) => branch.name);
-  const stepIndex = currentEvent ? Math.min(currentEvent.progress + 1, currentEvent.steps.length) : 0;
-  const currentStep = currentEvent?.steps[currentEvent.progress];
+  const stepIndex = currentEvent ? Math.min(focusStep + 1, currentEvent.steps.length) : 0;
+  const currentStep = currentEvent?.steps[focusStep];
 
   const vars: Record<string, string> = {
     novelTitle: '',
     genre: '',
     worldview: layers.find((layer) => layer.key === 'worldview')?.content ?? '',
     setting: layers.find((layer) => layer.key === 'setting')?.content ?? '',
+    styleSample: layers.find((layer) => layer.key === 'style-sample')?.content ?? '',
     characters: [
       layers.find((layer) => layer.key === 'characters-primary')?.content ?? '',
       layers.find((layer) => layer.key === 'characters-secondary')?.content ?? '',
@@ -607,6 +749,7 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
       .join('\n\n'),
     relations: layers.find((layer) => layer.key === 'relations')?.content ?? '',
     outlineOverview: layers.find((layer) => layer.key === 'outline-overview')?.content ?? '',
+    outlineTree: layers.find((layer) => layer.key === 'outline-tree')?.content ?? '',
     endingPlan: layers.find((layer) => layer.key === 'ending-plan')?.content ?? '',
     outline: layers.find((layer) => layer.key === 'outline-overview')?.content ?? '',
     currentEventOutline,
@@ -633,7 +776,8 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
       .filter((layer) => ['worldview', 'characters-primary', 'current-event'].includes(layer.key))
       .map((layer) => layer.content)
       .join('\n\n'),
-    calendar: preferences.calendar,
+    // 历法也从层里取，这样在界面上取消勾选就能真的不发送
+    calendar: layers.find((layer) => layer.key === 'calendar')?.content ?? '',
     targetWords: String(preferences.targetWords),
     tolerance: String(preferences.wordTolerancePercent),
     optionCount: '3',
@@ -654,6 +798,8 @@ export function buildContext(novelId: string, options: BuildContextOptions = {})
       preferences.rules.forbidden.length > 0 ? preferences.rules.forbidden.join('；') : '无',
     rulesExtra: preferences.rules.extra.length > 0 ? preferences.rules.extra.join('；') : '无',
     rulesExplicitText: preferences.rules.allowExplicit ? '允许' : '不允许',
+    // 大纲规则单独成项，只在生成与改写大纲时注入，正文任务用不到
+    outlineRules: preferences.rules.outline.trim() || '未设置，按通用写作要求处理',
   };
   // 模板中以 Revise 结尾的变量名与基础名保持一致，避免出现空占位
   vars.currentEventOutlineRevise = currentEventOutline;

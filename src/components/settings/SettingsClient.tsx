@@ -17,6 +17,7 @@ import {
   Toggle,
 } from '@/components/ui/primitives';
 import { PROVIDER_PRESETS } from '@/lib/ai/presets';
+import { describeVariable } from '@/lib/ai/prompts';
 import { LOCALES } from '@/lib/i18n';
 import type { AppSettings } from '@/lib/repo/settings';
 import type { ModelParams, Provider, TaskType } from '@/lib/types';
@@ -800,14 +801,36 @@ export function SettingsClient() {
         }
       >
         {promptEditing ? (
-          <div className="grid gap-3.5">
-            <p className="rounded-[6px] bg-surface-soft px-3 py-2 font-mono text-[0.68rem] leading-relaxed text-ink-muted">
-              {t('settings.placeholders')}：{promptEditing.placeholders.join('  ')}
-            </p>
+          <div className="grid gap-4">
+            {/*
+              变量清单逐条列出用途。
+              只给一串变量名等于没说，用户不知道每个会被替换成什么就不敢动模板。
+            */}
+            <div className="rounded-[8px] border border-[var(--glass-border)] bg-surface-soft px-3.5 py-3">
+              <p className="text-sm font-semibold text-soft">
+                {t('settings.placeholders')}
+                <span className="ml-2 text-xs font-normal text-ink-faint">
+                  {promptEditing.placeholders.length}
+                </span>
+              </p>
+              <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+                {t('settings.placeholdersHint')}
+              </p>
+              <ul className="mt-2.5 grid gap-1.5 sm:grid-cols-2">
+                {promptEditing.placeholders.map((name) => (
+                  <li key={name} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                    <code className="font-mono text-[0.82rem] text-accent-strong">{`{{${name}}}`}</code>
+                    <span className="text-xs leading-relaxed text-ink-muted">
+                      {describeVariable(name) || t('settings.varUnknown')}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
             <Field label={t('settings.systemPrompt')}>
               <TextArea
-                rows={10}
-                className="font-mono text-xs"
+                rows={12}
+                className="font-mono text-sm leading-relaxed"
                 value={promptForm.systemPrompt}
                 onChange={(event) =>
                   setPromptForm({ ...promptForm, systemPrompt: event.target.value })
@@ -816,8 +839,8 @@ export function SettingsClient() {
             </Field>
             <Field label={t('settings.userPrompt')}>
               <TextArea
-                rows={14}
-                className="font-mono text-xs"
+                rows={16}
+                className="font-mono text-sm leading-relaxed"
                 value={promptForm.userPrompt}
                 onChange={(event) => setPromptForm({ ...promptForm, userPrompt: event.target.value })}
               />

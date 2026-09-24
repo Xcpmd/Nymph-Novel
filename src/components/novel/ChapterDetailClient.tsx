@@ -22,6 +22,7 @@ import { MarkdownView } from '@/components/markdown/MarkdownView';
 import { ImmersiveReader } from './ImmersiveReader';
 import { BudgetConfirmPrompt } from './BudgetConfirmPrompt';
 import { useGeneration } from '@/hooks/useGeneration';
+import { useDraftState } from '@/hooks/useDraftState';
 import { buildSpeakerColors } from '@/lib/markdown/speakers';
 import { countWords } from '@/lib/token';
 import type {
@@ -56,7 +57,16 @@ export function ChapterDetailClient({
   const generation = useGeneration();
 
   const [chapter, setChapter] = useState<ChapterWithVolume | null>(null);
-  const [content, setContent] = useState('');
+  /*
+   * 正文与修改指令做本地缓存。
+   *
+   * key 里带上章节 id，草稿因此一章一份，切章节不会串。
+   * 加载时走 hydrate：有草稿以草稿为准，没有才用磁盘上的正文。
+   */
+  const [content, setContent, clearContent, hydrateContent] = useDraftState(
+    `${novelId}:chapter:${chapterId}:content`,
+    '',
+  );
   const [originalContent, setOriginalContent] = useState('');
   const [siblings, setSiblings] = useState<ChapterWithVolume[]>([]);
   const [event, setEvent] = useState<StoryEvent | null>(null);
@@ -67,7 +77,10 @@ export function ChapterDetailClient({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [selection, setSelection] = useState('');
-  const [instruction, setInstruction] = useState('');
+  const [instruction, setInstruction] = useDraftState(
+    `${novelId}:chapter:${chapterId}:instruction`,
+    '',
+  );
   const [revisionMode, setRevisionMode] = useState<RevisionMode>('rewrite');
   const [timelineSort, setTimelineSort] = useState('');
   const [stepIndex, setStepIndex] = useState(0);
@@ -113,7 +126,7 @@ export function ChapterDetailClient({
           api.get<Character[]>(novelResourcePath(novelId, 'characters')),
         ]);
       setChapter(chapterResult.chapter);
-      setContent(chapterResult.content);
+      hydrateContent(chapterResult.content);
       setOriginalContent(chapterResult.content);
       setSiblings(chapterList);
       setPreferences(preferenceResult.preferences);
@@ -135,7 +148,7 @@ export function ChapterDetailClient({
     } finally {
       setLoading(false);
     }
-  }, [chapterId, novelId, t, toast]);
+  }, [chapterId, novelId, hydrateContent, t, toast]);
 
   useEffect(() => {
     void load();
@@ -171,6 +184,8 @@ export function ChapterDetailClient({
       );
       setOriginalContent(content);
       if (result.chapter) setChapter({ ...result.chapter, wordCount: result.wordCount });
+      // 已经写进磁盘，草稿没有留的必要了
+      clearContent();
       toast.success(t('common.saved'));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('common.generateFailed'));

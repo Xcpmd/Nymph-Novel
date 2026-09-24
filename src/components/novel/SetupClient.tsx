@@ -171,11 +171,20 @@ export function SetupClient({ novelId }: { novelId: string }) {
     return () => clearTimeout(timer);
   }, [justSaved]);
 
+  /*
+   * 卸载时把还在等待的保存立刻发出去。
+   *
+   * 原先这里只是清掉定时器，用户在防抖窗口内切走页面，
+   * 那一次改动就永远留在内存里了 —— 表单上看不出异常，回来看却是旧值。
+   */
   useEffect(
     () => () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        void save(true);
+      }
     },
-    [],
+    [save],
   );
 
   /*
@@ -370,6 +379,20 @@ export function SetupClient({ novelId }: { novelId: string }) {
                 value={extraText}
                 onChange={(event) => {
                   setExtraText(event.target.value);
+                  scheduleLiveSave();
+                }}
+              />
+            </Field>
+            {/*
+              大纲规则单独成项：大纲与正文的写法并不一致，
+              混在通用规则里会同时约束两边，反而互相干扰。
+            */}
+            <Field label={t('setup.ruleOutline')} hint={t('setup.ruleOutlineHint')}>
+              <TextArea
+                rows={4}
+                value={preferences.rules.outline}
+                onChange={(event) => {
+                  patchRules({ outline: event.target.value });
                   scheduleLiveSave();
                 }}
               />

@@ -14,15 +14,20 @@ import {
   Panel,
   Spinner,
   TextArea,
+  TextInput,
   Toggle,
 } from '@/components/ui/primitives';
 import { MarkdownView } from '@/components/markdown/MarkdownView';
 import { deriveStepsFromOutline } from '@/lib/markdown/outline';
+import { clearDraftValue, readDraftValue, writeDraftValue } from '@/hooks/useDraftState';
 import type { StoryEvent, StoryEventListPayload, StoryEventStatus } from '@/lib/types';
 
 /** 事件大纲页。按状态分组展示全部故事事件及其大纲步骤与推进进度。 */
 
 const STATUS_ORDER: StoryEventStatus[] = ['writing', 'active', 'done', 'archived'];
+
+/** 手动新建事件的表单初值。 */
+const EMPTY_NEW_EVENT = { title: '', outline: '', novelTime: '', notes: '' };
 
 export function EventsClient({ novelId }: { novelId: string }) {
   const { t } = useSettings();
@@ -39,6 +44,10 @@ export function EventsClient({ novelId }: { novelId: string }) {
   /** 保存大纲时是否按新文本重推推进步骤 */
   const [rederiveSteps, setRederiveSteps] = useState(false);
   const [savingOutline, setSavingOutline] = useState(false);
+  /** 手动新建事件 */
+  const [newEventOpen, setNewEventOpen] = useState(false);
+  const [creatingEvent, setCreatingEvent] = useState(false);
+  const [newEvent, setNewEvent] = useState(EMPTY_NEW_EVENT);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -92,10 +101,73 @@ export function EventsClient({ novelId }: { novelId: string }) {
    * 步骤清单默认不动：步骤上可能已经有用户调整过的时间与细节，
    * 重推会丢掉这些内容，因此只在用户明确要求时才按新大纲重推。
    */
+  /** 新建表单的更新入口，顺带把内容落到草稿。 */
+  const updateNewEvent = (patch: Partial<typeof EMPTY_NEW_EVENT>) => {
+    setNewEvent((current) => {
+      const next = { ...current, ...patch };
+      writeDraftValue(`${novelId}:events:new`, next);
+      return next;
+    });
+  };
+
+  /** 打开新建弹窗，有草稿就接着上次写。 */
+  const openNewEvent = () => {
+    const cached = readDraftValue<typeof EMPTY_NEW_EVENT>(`${novelId}:events:new`);
+    setNewEvent(cached ?? EMPTY_NEW_EVENT);
+    setNewEventOpen(true);
+  };
+
+  /** 手动新建事件。
+   *
+   * 事件原先只能由工作台生成，想自己写一段大纲没有入口。
+   * 这里允许直接写标题与大纲正文，推进步骤由服务端从文本推导；
+   * 弹窗里实时显示能推导出多少步，写完就知道能不能立起来。
+   */
+  const createEvent = async () => {
+    const outline = newEvent.outline.trim();
+    if (!outline) {
+      toast.error(t('events.outlineRequired'));
+      return;
+    }
+    setCreatingEvent(true);
+    try {
+      await api.post(novelResourcePath(novelId, 'story-events'), {
+        title: newEvent.title,
+        outline,
+        novelTime: newEvent.novelTime,
+        notes: newEvent.notes,
+      });
+      setNewEventOpen(false);
+      setNewEvent(EMPTY_NEW_EVENT);
+      clearDraftValue(`${novelId}:events:new`);
+      toast.success(t('common.saved'));
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+    } finally {
+      setCreatingEvent(false);
+    }
+  };
+
+  /** 新建弹窗里当前大纲能推导出的步骤，给用户即时反馈。 */
+  const newEventSteps = deriveStepsFromOutline(newEvent.outline);
+
   const openOutlineEdit = (event: StoryEvent) => {
     setOutlineEditing(event);
-    setOutlineDraft(event.outline ?? '');
+    /*
+     * 打开时优先恢复草稿。
+     * 弹窗不是独立组件，挂不了 hook，所以手动读写：
+     * 上次改到一半切走了页面，这次打开还能接着改。
+     */
+    const cached = readDraftValue<string>(`${novelId}:events:outline:${event.id}`);
+    setOutlineDraft(cached ?? event.outline ?? '');
     setRederiveSteps(false);
+  };
+
+  /** 编辑大纲正文时同步落草稿，切换页面后回来还在。 */
+  const onOutlineDraftChange = (value: string) => {
+    setOutlineDraft(value);
+    if (outlineEditing) writeDraftValue(`${novelId}:events:outline:${outlineEditing.id}`, value);
   };
 
   const saveOutline = async () => {
@@ -122,6 +194,8 @@ export function EventsClient({ novelId }: { novelId: string }) {
         }));
       }
       await api.patch(novelResourcePath(novelId, 'story-events', outlineEditing.id), payload);
+      // 已落库，草稿可以清掉
+      clearDraftValue(`${novelId}:events:outline:${outlineEditing.id}`);
       setOutlineEditing(null);
       toast.success(t('common.saved'));
       await load();
@@ -139,9 +213,17 @@ export function EventsClient({ novelId }: { novelId: string }) {
 
   return (
     <div className="flex flex-col gap-5">
-      <header>
-        <h1 className="text-lg font-semibold text-soft">{t('events.title')}</h1>
-        <p className="mt-1 max-w-3xl text-xs leading-relaxed text-ink-muted">{t('events.hint')}</p>
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-semibold text-soft">{t('events.title')}</h1>
+          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-ink-muted">
+            {t('events.hint')}
+          </p>
+        </div>
+        <Button onClick={openNewEvent}>
+          <i className="fa-solid fa-plus" aria-hidden />
+          {t('events.newEvent')}
+        </Button>
       </header>
 
       {loading ? (
@@ -292,6 +374,86 @@ export function EventsClient({ novelId }: { novelId: string }) {
       )}
 
       <Modal
+        open={newEventOpen}
+        title={t('events.newEvent')}
+        description={t('events.newEventHint')}
+        size="xl"
+        onClose={() => setNewEventOpen(false)}
+        footer={
+          <>
+            <Button onClick={() => setNewEventOpen(false)}>{t('common.cancel')}</Button>
+            <Button
+              variant="primary"
+              onClick={createEvent}
+              disabled={creatingEvent || !newEvent.outline.trim()}
+            >
+              {creatingEvent ? <Spinner /> : <i className="fa-solid fa-check" aria-hidden />}
+              {t('common.create')}
+            </Button>
+          </>
+        }
+      >
+        <div className="grid gap-3.5">
+          <div className="grid gap-3.5 sm:grid-cols-2">
+            <Field label={t('events.eventTitle')} hint={t('events.titleOptionalHint')}>
+              <TextInput
+                value={newEvent.title}
+                placeholder={t('events.titleFromOutline')}
+                onChange={(event) => updateNewEvent({ title: event.target.value })}
+              />
+            </Field>
+            <Field label={t('events.novelTime')}>
+              <TextInput
+                value={newEvent.novelTime}
+                onChange={(event) => updateNewEvent({ novelTime: event.target.value })}
+              />
+            </Field>
+          </div>
+          <Field label={t('events.outlineContent')} required>
+            <TextArea
+              rows={14}
+              value={newEvent.outline}
+              placeholder={t('events.outlinePlaceholder')}
+              onChange={(event) => updateNewEvent({ outline: event.target.value })}
+            />
+          </Field>
+          <Field label={t('setup.notes')}>
+            <TextArea
+              rows={2}
+              value={newEvent.notes}
+              onChange={(event) => updateNewEvent({ notes: event.target.value })}
+            />
+          </Field>
+
+          {/* 推进步骤由大纲推导，这里先把结果亮出来 */}
+          <div className="rounded-[8px] border border-[var(--glass-border)] bg-surface-soft px-3.5 py-2.5">
+            <p className="text-sm font-semibold text-soft">
+              {t('events.derivedSteps')}
+              <span className="ml-2 text-xs font-normal text-ink-faint">
+                {newEventSteps.length}
+              </span>
+            </p>
+            {newEventSteps.length === 0 ? (
+              <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+                {t('events.derivedStepsEmpty')}
+              </p>
+            ) : (
+              <ol className="mt-1.5 flex flex-col gap-1">
+                {newEventSteps.map((step, index) => (
+                  <li key={index} className="flex gap-2 text-xs leading-relaxed text-ink-muted">
+                    <span className="shrink-0 font-mono text-ink-faint">
+                      {String(index + 1).padStart(2, '0')}
+                    </span>
+                    <span className="min-w-0 flex-1">{step.title}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
         open={outlineEditing !== null}
         title={t('events.editOutline')}
         description={t('events.editOutlineHint')}
@@ -312,7 +474,7 @@ export function EventsClient({ novelId }: { novelId: string }) {
             <TextArea
               rows={18}
               value={outlineDraft}
-              onChange={(event) => setOutlineDraft(event.target.value)}
+              onChange={(event) => onOutlineDraftChange(event.target.value)}
             />
           </Field>
           <Toggle

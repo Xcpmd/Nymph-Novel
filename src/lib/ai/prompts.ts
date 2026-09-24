@@ -171,6 +171,9 @@ ${RECALL_RULES}
 整本书大纲：
 {{outlineOverview}}
 
+结构化大纲：
+{{outlineTree}}
+
 结局与收束计划：
 {{endingPlan}}
 
@@ -197,6 +200,9 @@ ${RECALL_RULES}
 已确认的故事方向：{{direction}}
 
 用户补充要求：{{instruction}}
+
+大纲生成规则：
+{{outlineRules}}
 
 ${ruleBlock()}
 
@@ -229,6 +235,9 @@ ${QUERY_RULES}`,
 整本书大纲：
 {{outlineOverview}}
 
+结构化大纲：
+{{outlineTree}}
+
 时间轴：
 {{timeline}}
 
@@ -237,6 +246,9 @@ ${QUERY_RULES}`,
 
 用户的修改要求：
 {{instruction}}
+
+大纲生成规则：
+{{outlineRules}}
 
 ${ruleBlock()}
 
@@ -283,6 +295,9 @@ ${QUERY_RULES}`,
 用户的修改要求：
 {{instruction}}
 
+大纲生成规则：
+{{outlineRules}}
+
 ${ruleBlock()}
 
 请输出修改后的整本书大纲。`,
@@ -305,6 +320,9 @@ ${QUERY_RULES}`,
     userPrompt: `整本书大纲：
 {{outlineOverview}}
 
+结构化大纲：
+{{outlineTree}}
+
 设定与世界观：
 {{worldview}}
 
@@ -321,6 +339,9 @@ ${QUERY_RULES}`,
 
 待撰写的节点信息：
 {{instruction}}
+
+大纲生成规则：
+{{outlineRules}}
 
 ${ruleBlock()}
 
@@ -383,6 +404,9 @@ ${QUERY_RULES}`,
 所有已完成事件的大纲：
 {{finishedOutlines}}
 
+结构化大纲：
+{{outlineTree}}
+
 时间轴：
 {{timeline}}
 
@@ -391,6 +415,9 @@ ${QUERY_RULES}`,
 
 本章任务：{{chapterTitle}}
 本章推进方向：{{direction}}
+
+文风样本：
+{{styleSample}}
 
 ${ruleBlock()}
 
@@ -432,6 +459,9 @@ ${TALK_RULES}`,
 
 当前事件大纲：
 {{currentEventOutline}}
+
+文风样本：
+{{styleSample}}
 
 ${ruleBlock()}
 
@@ -637,6 +667,73 @@ export function extractPlaceholders(template: string): string[] {
     if (match[1]) found.add(match[1]);
   }
   return Array.from(found).sort();
+}
+
+/*
+ * 模板变量的用途说明。
+ *
+ * 设置页让用户改提示词时，光给一串变量名等于没说：
+ * 不知道每个变量会被替换成什么，就不敢动模板。
+ * 这里逐条写清来源，新增变量时同步补一条。
+ */
+export const VARIABLE_NOTES: Record<string, string> = {
+  /* 作品基本盘 */
+  novelTitle: '小说标题',
+  genre: '题材，取自作品信息',
+  worldview: '设定与世界观正文',
+  setting: '核心设定补充',
+  styleSample: '文风样本，设定页里填的示范段落，用于对齐文笔',
+  endingPlan: '结局与收束计划',
+  calendar: '小说内历法，用于统一时间写法',
+
+  /* 结构与素材 */
+  outlineOverview: '整本书大纲，即大纲总纲',
+  outlineTree: '结构化大纲，大纲页维护的篇章与节拍层级',
+  outlineRules: '大纲生成规则，在设定与规则里维护',
+  characters: '主要人物档案，按重要度排序',
+  relations: '人物之间的关系网',
+  encyclopedia: '按关键词检索到的百科条目正文',
+  encyclopediaIndex: '百科条目索引，只含名称与分类',
+  timeline: '时间轴上的事件',
+  finishedOutlines: '已完成事件的大纲',
+
+  /* 往期内容 */
+  context: '往期正文与大纲片段',
+  recalled: '模型主动调阅的往期片段',
+  previousChapter: '上一章正文',
+
+  /* 本次任务 */
+  direction: '用户确认的本章推进方向',
+  instruction: '用户填写的额外要求',
+  revisionMode: '修改模式说明，按指令修改或整体重写',
+  existingContent: '待修改的现有内容',
+  targetWords: '本章目标字数',
+  tolerance: '字数允许的浮动范围',
+  optionCount: '需要生成几个故事方向',
+
+  /* 当前事件与步骤 */
+  currentEvent: '当前推进中的事件标题',
+  currentEventOutline: '当前事件的大纲正文',
+  currentEventSteps: '当前事件的步骤清单',
+  eventProgress: '当前事件已完成的步数',
+  eventStepCount: '当前事件的步骤总数',
+  eventPosition: '当前事件在时间轴上的位置',
+  stepTitle: '本章对应的步骤标题',
+  stepIndex: '本章对应的步骤序号',
+  chapterTitle: '本章标题',
+
+  /* 生成规则 */
+  rulesStyle: '文风要求',
+  rulesPov: '叙事人称',
+  rulesSpeech: '角色口吻与称呼约束',
+  rulesForbidden: '禁止出现的内容',
+  rulesExplicitText: '成人内容开关对应的说明',
+  rulesExtra: '自定义附加规则，逐条列出',
+};
+
+/** 取某个变量的用途说明，未登记时返回空串。 */
+export function describeVariable(name: string): string {
+  return VARIABLE_NOTES[name] ?? '';
 }
 
 /* ------------------------------------------------------ 输出标记的解析 */

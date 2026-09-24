@@ -136,6 +136,8 @@ export interface GenerationRequest {
   maxTokens?: number;
   /** 上下文超出预算并已由用户确认保留全文 */
   confirmOverBudget?: boolean;
+  /** 本次要写第几步，从 0 开始。缺省跟随事件进度 */
+  stepIndex?: number;
 }
 
 export function useGeneration() {

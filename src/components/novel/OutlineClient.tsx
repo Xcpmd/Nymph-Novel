@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { api, novelResourcePath } from '@/lib/client/api';
+import { useFormDraft } from '@/hooks/useFormDraft';
 import { useSettings } from '@/components/providers/SettingsProvider';
 import { useToast } from '@/components/ui/Toast';
 import { ConfirmDialog, Modal } from '@/components/ui/Modal';
@@ -75,13 +76,24 @@ export function OutlineClient({ novelId }: { novelId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [novelId]);
 
+  const formDraft = useFormDraft({
+    scope: `${novelId}:outline`,
+    targetId: editing?.id ?? null,
+    open: editing !== null || parentForNew !== undefined,
+    value: form,
+  });
+
   const openCreate = (parentId: string | null) => {
-    setForm({ title: '', content: '', kind: parentId ? 'sub' : 'arc', status: 'planned' });
+    const cached = formDraft.restore(parentId ? `new:${parentId}` : 'new');
+    if (cached) setForm(cached);
+    else setForm({ title: '', content: '', kind: parentId ? 'sub' : 'arc', status: 'planned' });
     setParentForNew(parentId);
   };
 
   const openEdit = (node: OutlineNode) => {
-    setForm({ title: node.title, content: node.content, kind: node.kind, status: node.status });
+    const cached = formDraft.restore(node.id);
+    if (cached) setForm(cached);
+    else setForm({ title: node.title, content: node.content, kind: node.kind, status: node.status });
     setEditing(node);
   };
 
@@ -102,6 +114,7 @@ export function OutlineClient({ novelId }: { novelId: string }) {
         setParentForNew(undefined);
       }
       toast.success(t('common.saved'));
+      formDraft.clear();
       await load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('common.generateFailed'));

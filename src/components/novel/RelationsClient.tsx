@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, novelResourcePath } from '@/lib/client/api';
+import { useFormDraft } from '@/hooks/useFormDraft';
 import { useSettings } from '@/components/providers/SettingsProvider';
 import { useToast } from '@/components/ui/Toast';
 import { ConfirmDialog, Modal } from '@/components/ui/Modal';
@@ -98,7 +99,21 @@ export function RelationsClient({ novelId }: { novelId: string }) {
     return characters.filter((character) => !connected.has(character.id));
   }, [characters, relations]);
 
+  /** 弹窗表单的草稿，页面切换后回来接着改。 */
+  const formDraft = useFormDraft({
+    scope: `${novelId}:relations`,
+    targetId: editing?.id ?? null,
+    open: creating || editing !== null,
+    value: form,
+  });
+
   const openCreate = (fromId?: string) => {
+    const cached = formDraft.restore('new');
+    if (cached) {
+      setForm(cached);
+      setCreating(true);
+      return;
+    }
     setForm({
       ...EMPTY_FORM,
       fromCharacterId: fromId ?? characters[0]?.id ?? '',
@@ -108,15 +123,18 @@ export function RelationsClient({ novelId }: { novelId: string }) {
   };
 
   const openEdit = (relation: CharacterRelation) => {
-    setForm({
-      fromCharacterId: relation.fromCharacterId,
-      toCharacterId: relation.toCharacterId,
-      kind: relation.kind,
-      label: relation.label,
-      bidirectional: relation.bidirectional,
-      strength: relation.strength,
-      notes: relation.notes,
-    });
+    const cached = formDraft.restore(relation.id);
+    if (cached) setForm(cached);
+    else
+      setForm({
+        fromCharacterId: relation.fromCharacterId,
+        toCharacterId: relation.toCharacterId,
+        kind: relation.kind,
+        label: relation.label,
+        bidirectional: relation.bidirectional,
+        strength: relation.strength,
+        notes: relation.notes,
+      });
     setEditing(relation);
   };
 
@@ -138,6 +156,7 @@ export function RelationsClient({ novelId }: { novelId: string }) {
         setCreating(false);
       }
       toast.success(t('common.saved'));
+      formDraft.clear();
       await load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('common.generateFailed'));

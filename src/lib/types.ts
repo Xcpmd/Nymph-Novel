@@ -407,6 +407,8 @@ export interface GenerationRules {
   speechHabits: string;
   /** 自定义附加规则，逐条生效 */
   extra: string[];
+  /** 大纲生成规则，只在生成与改写大纲时注入，正文任务用不到 */
+  outline: string;
 }
 
 export interface ContextBudget {
@@ -429,6 +431,13 @@ export interface NovelPreferences {
   wordTolerancePercent: number;
   /** 小说内历法说明 */
   calendar: string;
+  /**
+   * 参与提示词的上下文层与顺序。
+   *
+   * 空数组表示不设限：全部层都注入，并沿用程序内置的顺序。
+   * 非空时按白名单处理，数组顺序即注入顺序。
+   */
+  contextLayers: string[];
   /** 生成规则 */
   rules: GenerationRules;
   /** 上下文预算 */

@@ -2,7 +2,7 @@
 
 import clsx from 'clsx';
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, formatNumber, novelResourcePath } from '@/lib/client/api';
 import { useSettings } from '@/components/providers/SettingsProvider';
 import { useToast } from '@/components/ui/Toast';
@@ -21,8 +21,10 @@ import { MarkdownView } from '@/components/markdown/MarkdownView';
 import { ContextInspector } from './ContextInspector';
 import { BudgetConfirmPrompt } from './BudgetConfirmPrompt';
 import { useGeneration } from '@/hooks/useGeneration';
+import { useDraftState } from '@/hooks/useDraftState';
 import { normalizeOptionList } from '@/lib/ai/prompts';
 import { buildSpeakerColors } from '@/lib/markdown/speakers';
+import { deriveStepsFromOutline } from '@/lib/markdown/outline';
 import { countWords } from '@/lib/token';
 import { stripWalkMarkers } from '@/lib/markdown/talk';
 import type {
@@ -68,15 +70,42 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
   const [chapters, setChapters] = useState<ChapterWithVolume[]>([]);
   const [currentEvent, setCurrentEvent] = useState<StoryEvent | null>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
+  /** 可选的上下文层清单，来自服务端定义 */
+  const [layerCatalog, setLayerCatalog] = useState<
+    Array<{ key: string; label: string; note: string }>
+  >([]);
   const [loading, setLoading] = useState(true);
   const [step, setStep] = useState<StepKey>('direction');
 
-  const [customDirection, setCustomDirection] = useState('');
+  /*
+   * 用户输入的部分做本地缓存。
+   *
+   * 切到别的页面再回来，组件会重新挂载，普通 state 里的输入就没了。
+   * 大纲草稿不在此列——它已经防抖落库，重新加载时会从事件里读回来。
+   */
+  const [customDirection, setCustomDirection] = useDraftState(
+    `${novelId}:workbench:direction`,
+    '',
+  );
   const [selectedDirection, setSelectedDirection] = useState('');
-  const [additionalInstruction, setAdditionalInstruction] = useState('');
+  const [additionalInstruction, setAdditionalInstruction] = useDraftState(
+    `${novelId}:workbench:instruction`,
+    '',
+  );
   const [chapterId, setChapterId] = useState('');
-  const [newChapterTitle, setNewChapterTitle] = useState('');
-  const [outlineReviseAsk, setOutlineReviseAsk] = useState('');
+  const [newChapterTitle, setNewChapterTitle] = useDraftState(
+    `${novelId}:workbench:new-chapter`,
+    '',
+  );
+  const [outlineReviseAsk, setOutlineReviseAsk, clearOutlineReviseAsk] = useDraftState(
+    `${novelId}:workbench:revise-ask`,
+    '',
+  );
+  /** 大纲草稿，用户可直接编辑 */
+  const [outlineDraft, setOutlineDraft] = useState('');
+  /** 大纲历史，每次 AI 改写或手动大改前压入，供随时撤回 */
+  const [outlineHistory, setOutlineHistory] = useState<string[]>([]);
+  const [outlineSaving, setOutlineSaving] = useState(false);
   const [confirmSave, setConfirmSave] = useState(false);
   /** 被用户主动丢弃的那一段生成结果。新的生成产生不同文本时会自动恢复显示。 */
   const [discardedText, setDiscardedText] = useState('');
@@ -84,19 +113,30 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [chapterList, preferenceResult, providerResult, eventResult, characterResult] =
-        await Promise.all([
-          api.get<ChapterWithVolume[]>(novelResourcePath(novelId, 'chapters')),
-          api.get<{ preferences: NovelPreferences }>(novelResourcePath(novelId, 'preferences')),
-          api.get<{ providers: Provider[] }>('/api/providers'),
-          api.get<StoryEventListPayload>(novelResourcePath(novelId, 'story-events')),
-          api.get<Character[]>(novelResourcePath(novelId, 'characters')),
-        ]);
+      const [
+        chapterList,
+        preferenceResult,
+        providerResult,
+        eventResult,
+        characterResult,
+        layerResult,
+      ] = await Promise.all([
+        api.get<ChapterWithVolume[]>(novelResourcePath(novelId, 'chapters')),
+        api.get<{ preferences: NovelPreferences }>(novelResourcePath(novelId, 'preferences')),
+        api.get<{ providers: Provider[] }>('/api/providers'),
+        api.get<StoryEventListPayload>(novelResourcePath(novelId, 'story-events')),
+        api.get<Character[]>(novelResourcePath(novelId, 'characters')),
+        // 上下文层清单由服务端定义，界面只负责展示与勾选
+        api.get<{ layers: Array<{ key: string; label: string; note: string }> }>(
+          novelResourcePath(novelId, 'context-layers'),
+        ),
+      ]);
       setChapters(chapterList);
       setPreferences(preferenceResult.preferences);
       setProviders(providerResult.providers);
       setCurrentEvent(eventResult.current);
       setCharacters(characterResult);
+      setLayerCatalog(layerResult.layers ?? []);
 
       // 进入工作台时按当前状态自动落到合适的步骤
       const requested = new URLSearchParams(window.location.search).get('chapterId');
@@ -190,6 +230,117 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
   };
 
   /**
+   * 大纲的编辑、保存与撤回。
+   *
+   * 大纲原先只能整体重新生成，改一句话也要重跑一次。
+   * 现在正文可改，改完防抖落库；AI 改写前把当前版本压入历史，
+   * 不满意随时退回上一版。
+   *
+   * 历史只放在内存里：够覆盖一次调整回合，刷新后作废。
+   * 真正需要长期留档的内容走事件页的版本概念，不在这里堆。
+   */
+  const outlineSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /*
+   * 卸载时的补发要用到最新值，但清理函数只建立一次，
+   * 捕获不到后续渲染里的变量，因此用 ref 转一手。
+   */
+  const pendingOutlineRef = useRef<{ eventId: string; text: string } | null>(null);
+  useEffect(() => {
+    pendingOutlineRef.current = activeEvent
+      ? { eventId: activeEvent.id, text: outlineDraft }
+      : null;
+    // activeEvent 每次渲染都是新对象，只跟 id 走
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEvent?.id, outlineDraft]);
+
+  const persistOutline = useCallback(
+    async (text: string, eventId: string) => {
+      setOutlineSaving(true);
+      try {
+        await api.patch(novelResourcePath(novelId, 'story-events', eventId), { outline: text });
+        setCurrentEvent((current) => (current?.id === eventId ? { ...current, outline: text } : current));
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+      } finally {
+        setOutlineSaving(false);
+      }
+    },
+    [novelId, t, toast],
+  );
+
+  const onOutlineChange = (value: string) => {
+    setOutlineDraft(value);
+    if (!activeEvent) return;
+    if (outlineSaveTimer.current) clearTimeout(outlineSaveTimer.current);
+    outlineSaveTimer.current = setTimeout(() => void persistOutline(value, activeEvent.id), 800);
+  };
+
+  /** 撤回上一版大纲。 */
+  const undoOutline = async () => {
+    if (outlineHistory.length === 0 || !activeEvent) return;
+    const [previous, ...rest] = outlineHistory;
+    setOutlineHistory(rest);
+    setOutlineDraft(previous);
+    await persistOutline(previous, activeEvent.id);
+  };
+
+  /** 当前大纲能切出多少章，实时反映在预览里。 */
+  const draftSteps = useMemo(() => deriveStepsFromOutline(outlineDraft), [outlineDraft]);
+
+  /*
+   * 切换事件时重置草稿与历史。
+   *
+   * 刻意只依赖 id 而不依赖 outline 内容：草稿是用户的输入目标，
+   * 若跟着 outline 走，用户每敲一个字都会被库里的旧值覆盖回去。
+   * AI 改写后的同步交给下面那个 effect 处理。
+   */
+  useEffect(() => {
+    setOutlineDraft(activeEvent?.outline ?? '');
+    setOutlineHistory([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEvent?.id]);
+
+  // AI 改写完成后把新大纲同步进草稿，事件 id 不变，上面的 effect 不会触发
+  useEffect(() => {
+    if (generation.eventOutline?.outline) setOutlineDraft(generation.eventOutline.outline);
+  }, [generation.eventOutline]);
+
+  /*
+   * 离开页面时把还没落库的大纲改动补发一次。
+   *
+   * 只清定时器是不够的：用户在防抖窗口内切走，这次编辑就丢了，
+   * 而界面看不出任何异常。
+   */
+  useEffect(
+    () => () => {
+      if (!outlineSaveTimer.current) return;
+      clearTimeout(outlineSaveTimer.current);
+      const pending = pendingOutlineRef.current;
+      if (pending) void persistOutline(pending.text, pending.eventId);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  /**
+   * 保存参与提示词的上下文层与顺序。
+   *
+   * 立即落库而不是等统一保存：这个选择会影响下一次生成，
+   * 用户勾完往往直接就去点生成了。
+   */
+  const saveContextLayers = useCallback(
+    async (keys: string[]) => {
+      setPreferences((current) => (current ? { ...current, contextLayers: keys } : current));
+      try {
+        await api.patch(novelResourcePath(novelId, 'preferences'), { contextLayers: keys });
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+      }
+    },
+    [novelId, t, toast],
+  );
+
+  /**
    * 确认方向，进入第二步检视并修改故事大纲。
    *
    * 手写与 AI 给出的方向走同一条路径，都要经过大纲这一步。
@@ -219,14 +370,48 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
       toast.error(t('workbench.noEventForRevise'));
       return;
     }
+    const current = outlineDraft || activeEvent.outline;
+    // 改写前留一份当前版本，改坏了可以退回
+    setOutlineHistory((history) => [current, ...history].slice(0, 12));
     setStep('outline');
     await generation.start({
       novelId,
       taskType: 'outline_revise',
       instruction: outlineReviseAsk,
       eventId: activeEvent.id,
-      existingContent: activeEvent.outline,
+      // 送过去的是用户手上这一版，而不是库里的旧值
+      existingContent: current,
     });
+    // 要求已经送出去，清掉草稿，免得下次进来又看到上一次的输入
+    clearOutlineReviseAsk();
+  };
+  /**
+   * 把手写的大纲存成事件。
+   *
+   * 走到这一步时还没有任何事件，用户在这个输入框里从头写一份大纲，
+   * 保存后推进步骤由服务端从文本推导，后续流程与 AI 生成的大纲完全一致。
+   */
+  const saveDraftAsEvent = async () => {
+    const text = outlineDraft.trim();
+    if (!text) {
+      toast.error(t('events.outlineRequired'));
+      return;
+    }
+    setOutlineSaving(true);
+    try {
+      const result = await api.post<{ event: StoryEvent }>(
+        novelResourcePath(novelId, 'story-events'),
+        { outline: text },
+      );
+      setCurrentEvent(result.event);
+      setOutlineDraft(result.event.outline ?? text);
+      toast.success(t('workbench.outlineSaved'));
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+    } finally {
+      setOutlineSaving(false);
+    }
   };
 
   /**
@@ -256,7 +441,8 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
       return null;
     }
     try {
-      const nextStepIndex = activeEvent ? activeEvent.progress : undefined;
+      // 章节落在用户选中的那一步上，而不是死跟事件进度
+      const nextStepIndex = activeEvent ? effectiveStepIndex : undefined;
       const result = await api.post<{ chapter: ChapterWithVolume }>(
         novelResourcePath(novelId, 'chapters'),
         {
@@ -276,6 +462,21 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
     }
   };
 
+  /*
+   * 本次要写的步骤。
+   *
+   * null 表示跟随事件进度。允许单独指定是为了补写与跳写：
+   * 回头补第 2 步，或先把高潮那一步写出来，都不必改动事件进度。
+   */
+  const [focusStep, setFocusStep] = useState<number | null>(null);
+  // 切换事件时回到跟随进度
+  useEffect(() => {
+    setFocusStep(null);
+  }, [activeEvent?.id]);
+
+  /** 实际用于生成的步骤序号 */
+  const effectiveStepIndex = focusStep ?? activeEvent?.progress ?? 0;
+
   const generateChapter = async () => {
     const id = await createChapterIfNeeded();
     if (!id) return;
@@ -287,7 +488,15 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
       direction: selectedDirection || customDirection,
       instruction: additionalInstruction,
       eventId: activeEvent?.id ?? null,
-      autoAdvanceEvent: preferences?.autoAdvanceEvent ?? true,
+      // 服务端按这个序号决定本次写哪一步
+      stepIndex: activeEvent ? effectiveStepIndex : undefined,
+      /*
+       * 只有写的正是进度所在那一步时才推进事件。
+       * 回头补写或提前跳写都不该改动进度，否则后面几步会被当作已完成跳过。
+       */
+      autoAdvanceEvent:
+        (preferences?.autoAdvanceEvent ?? true) &&
+        (!activeEvent || activeEvent.progress === effectiveStepIndex),
       autoExtractSettings: preferences?.autoExtractSettings ?? true,
     });
   };
@@ -512,9 +721,27 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
                         </span>
                       ) : null}
                     </div>
-                    <div className="card max-h-[32rem] overflow-y-auto px-5 py-4">
-                      <MarkdownView content={activeEvent.outline} />
+                    {/* 大纲正文可直接编辑，改完防抖落库 */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="panel-title">{t('workbench.outlineContent')}</p>
+                      {outlineSaving ? (
+                        <span className="text-[0.68rem] text-ink-faint">
+                          {t('workbench.outlineSaving')}
+                        </span>
+                      ) : null}
+                      {outlineHistory.length > 0 ? (
+                        <Button size="sm" className="ml-auto" onClick={() => void undoOutline()}>
+                          <i className="fa-solid fa-rotate-left" aria-hidden />
+                          {t('workbench.undoOutline')}
+                        </Button>
+                      ) : null}
                     </div>
+                    <TextArea
+                      rows={16}
+                      className="font-mono text-sm leading-relaxed"
+                      value={outlineDraft}
+                      onChange={(event) => onOutlineChange(event.target.value)}
+                    />
                     {activeEvent.steps.length > 0 ? (
                       <ol className="flex flex-col gap-2">
                         {activeEvent.steps.map((item, index) => (
@@ -561,37 +788,144 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
                     ) : null}
                   </>
                 ) : (
-                  <p className="text-xs text-ink-faint">{t('outline.emptyHint')}</p>
+                  /*
+                   * 还没有事件时的入口。
+                   * 用户可以在这里从头写一份大纲，直接存成事件，不必先让 AI 生成。
+                   */
+                  <>
+                    <p className="text-xs leading-relaxed text-ink-muted">
+                      {t('workbench.outlineEmptyHint')}
+                    </p>
+                    <TextArea
+                      rows={14}
+                      className="font-mono text-sm leading-relaxed"
+                      placeholder={t('workbench.outlinePlaceholder')}
+                      value={outlineDraft}
+                      onChange={(event) => onOutlineChange(event.target.value)}
+                    />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="primary"
+                        onClick={() => void saveDraftAsEvent()}
+                        disabled={!outlineDraft.trim() || outlineSaving}
+                      >
+                        {outlineSaving ? (
+                          <Spinner />
+                        ) : (
+                          <i className="fa-solid fa-floppy-disk" aria-hidden />
+                        )}
+                        {t('workbench.outlineSaveAsEvent')}
+                      </Button>
+                      <span className="text-xs text-ink-faint">
+                        {t('workbench.outlineSaveAsEventHint')}
+                      </span>
+                    </div>
+                  </>
                 )}
 
-                <Field
-                  label={t('workbench.outlineRevise')}
-                  hint={t('workbench.outlineRevisePlaceholder')}
-                >
-                  <TextArea
-                    rows={3}
-                    value={outlineReviseAsk}
-                    onChange={(event) => setOutlineReviseAsk(event.target.value)}
-                  />
-                </Field>
+                {/*
+                  终端式的改写入口。
+                  与上方正文分工明确：上方是「改成什么样」，这里是「按什么要求改」。
+                */}
+                <div className="overflow-hidden rounded-[10px] border border-black/25 bg-[#14161a] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
+                  <div className="flex items-center gap-1.5 border-b border-white/10 px-3 py-1.5">
+                    <span className="h-2.5 w-2.5 rounded-full bg-[#ff5f57]" />
+                    <span className="h-2.5 w-2.5 rounded-full bg-[#febc2e]" />
+                    <span className="h-2.5 w-2.5 rounded-full bg-[#28c840]" />
+                    <span className="ml-2 font-mono text-[0.65rem] tracking-wide text-white/40">
+                      {t('workbench.terminalTitle')}
+                    </span>
+                  </div>
+                  <div className="flex items-start gap-2 px-3 py-2.5">
+                    <span
+                      className="shrink-0 font-mono text-sm leading-6 text-[#4ade80]"
+                      aria-hidden
+                    >
+                      ›
+                    </span>
+                    <textarea
+                      rows={2}
+                      value={outlineReviseAsk}
+                      placeholder={t('workbench.terminalPlaceholder')}
+                      onChange={(event) => setOutlineReviseAsk(event.target.value)}
+                      onKeyDown={(event) => {
+                        // 回车发送，Shift 加回车换行
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault();
+                          if (generation.status !== 'running' && activeEvent) void reviseOutline();
+                        }
+                      }}
+                      className="min-h-[3rem] flex-1 resize-y bg-transparent font-mono text-sm leading-6 text-[#e8e8e8] outline-none placeholder:text-white/25"
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 border-t border-white/10 px-3 py-1.5">
+                    <span className="font-mono text-[0.62rem] text-white/30">
+                      {t('workbench.terminalHint')}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      className="ml-auto"
+                      onClick={() => void reviseOutline()}
+                      disabled={
+                        generation.status === 'running' || !activeEvent || !outlineReviseAsk.trim()
+                      }
+                    >
+                      {generation.status === 'running' ? (
+                        <Spinner />
+                      ) : (
+                        <i className="fa-solid fa-paper-plane" aria-hidden />
+                      )}
+                      {t('workbench.terminalSend')}
+                    </Button>
+                  </div>
+                </div>
+
+                {generation.error ? (
+                  <p className="rounded-[6px] bg-danger-soft px-3 py-2 text-xs leading-relaxed text-danger">
+                    {generation.error}
+                  </p>
+                ) : null}
+
+                {/* 实时切分预览：改一句就能看到章数怎么变 */}
+                <div className="rounded-[10px] border border-[var(--glass-border)] px-3.5 py-3">
+                  <div className="flex flex-wrap items-baseline gap-2">
+                    <p className="panel-title">{t('workbench.splitPreview')}</p>
+                    <span className="chip chip-accent">{draftSteps.length}</span>
+                  </div>
+                  {draftSteps.length === 0 ? (
+                    <p className="mt-1.5 text-xs leading-relaxed text-ink-faint">
+                      {t('workbench.splitPreviewEmpty')}
+                    </p>
+                  ) : (
+                    <ol className="mt-2 grid gap-1 sm:grid-cols-2">
+                      {draftSteps.map((step, index) => (
+                        <li
+                          key={index}
+                          className="flex items-baseline gap-2 text-xs leading-relaxed text-ink-muted"
+                        >
+                          <span className="shrink-0 font-mono text-[0.68rem] text-ink-faint">
+                            {String(index + 1).padStart(2, '0')}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate">{step.title}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </div>
+
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    onClick={reviseOutline}
-                    disabled={generation.status === 'running' || !activeEvent}
-                  >
-                    <i className="fa-solid fa-pen-fancy" aria-hidden />
-                    {t('workbench.outlineRevise')}
-                  </Button>
                   {/* 大纲本身不会自动变成章节，这里给一个明确的动作入口 */}
                   <Button
                     onClick={() => void splitChapters()}
-                    disabled={!activeEvent || activeEvent.steps.length === 0}
+                    disabled={!activeEvent || draftSteps.length === 0}
                   >
                     <i className="fa-solid fa-list-ol" aria-hidden />
                     {t('workbench.splitChapters')}
                   </Button>
                   <Button
                     variant="primary"
+                    className="ml-auto"
                     onClick={() => setStep('chapter')}
                     disabled={!activeEvent}
                   >
@@ -644,13 +978,33 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
                 ) : null}
 
                 {activeEvent && activeEvent.steps.length > 0 ? (
-                  <div className="rounded-[6px] border border-line-soft bg-surface-sunken px-3 py-2.5">
-                    <p className="text-[0.7rem] font-semibold text-ink-muted">
-                      {t('workbench.currentStep')}
-                    </p>
-                    <p className="mt-1 text-sm text-soft">
-                      {activeEvent.steps[activeEvent.progress]?.title ?? t('workbench.eventDone')}
-                    </p>
+                  <div className="flex flex-col gap-2">
+                    <Field label={t('workbench.currentStep')} hint={t('workbench.stepPickHint')}>
+                      <Select
+                        value={String(effectiveStepIndex)}
+                        onChange={(event) => {
+                          const next = Number(event.target.value);
+                          // 选中的恰好是进度所在那一步时，回到「跟随进度」
+                          setFocusStep(next === activeEvent.progress ? null : next);
+                        }}
+                      >
+                        {activeEvent.steps.map((item, index) => (
+                          <option key={`${item.title}-${index}`} value={index}>
+                            {index + 1}. {item.title}
+                            {index < activeEvent.progress
+                              ? `（${t('workbench.stepDoneOption')}）`
+                              : index === activeEvent.progress
+                                ? `（${t('workbench.stepProgressOption')}）`
+                                : ''}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    {focusStep !== null && focusStep !== activeEvent.progress ? (
+                      <p className="text-[0.68rem] leading-relaxed text-warn">
+                        {t('workbench.stepOffProgress')}
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
 
@@ -877,7 +1231,12 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
 
         <aside className="flex flex-col gap-4">
           <Panel title={t('workbench.contextTitle')} description={t('workbench.contextHint')}>
-            <ContextInspector meta={generation.meta} />
+            <ContextInspector
+              meta={generation.meta}
+              catalog={layerCatalog}
+              selected={preferences?.contextLayers ?? []}
+              onChange={(keys) => void saveContextLayers(keys)}
+            />
           </Panel>
 
           <Panel title={t('common.preview')}>

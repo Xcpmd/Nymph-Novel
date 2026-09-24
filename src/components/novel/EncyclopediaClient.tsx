@@ -3,6 +3,7 @@
 import clsx from 'clsx';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, novelResourcePath } from '@/lib/client/api';
+import { useFormDraft } from '@/hooks/useFormDraft';
 import { useSettings } from '@/components/providers/SettingsProvider';
 import { useToast } from '@/components/ui/Toast';
 import { ConfirmDialog, Modal } from '@/components/ui/Modal';
@@ -96,20 +97,33 @@ export function EncyclopediaClient({ novelId }: { novelId: string }) {
     });
   }, [entries, activeCategory, keyword]);
 
+  /** 弹窗表单的草稿，页面切换后回来接着改。 */
+  const formDraft = useFormDraft({
+    scope: `${novelId}:encyclopedia`,
+    targetId: editing?.id ?? null,
+    open: creating || editing !== null,
+    value: form,
+  });
+
   const openCreate = (category?: string) => {
-    setForm({ ...EMPTY_FORM, category: category ?? CATEGORY_PRESETS[0]! });
+    const cached = formDraft.restore('new');
+    if (cached) setForm(cached);
+    else setForm({ ...EMPTY_FORM, category: category ?? CATEGORY_PRESETS[0]! });
     setCreating(true);
   };
 
   const openEdit = (entry: EncyclopediaEntry) => {
-    setForm({
-      name: entry.name,
-      category: entry.category,
-      aliases: entry.aliases,
-      summary: entry.summary,
-      content: entry.content,
-      tags: entry.tags.join('，'),
-    });
+    const cached = formDraft.restore(entry.id);
+    if (cached) setForm(cached);
+    else
+      setForm({
+        name: entry.name,
+        category: entry.category,
+        aliases: entry.aliases,
+        summary: entry.summary,
+        content: entry.content,
+        tags: entry.tags.join('，'),
+      });
     setEditing(entry);
     void loadVersions(entry.id);
   };
@@ -158,6 +172,7 @@ export function EncyclopediaClient({ novelId }: { novelId: string }) {
         setCreating(false);
       }
       toast.success(t('common.saved'));
+      formDraft.clear();
       await load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('common.generateFailed'));

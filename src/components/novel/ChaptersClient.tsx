@@ -19,6 +19,7 @@ import {
   TextInput,
 } from '@/components/ui/primitives';
 import { formatNumber } from '@/lib/client/api';
+import { useFormDraft } from '@/hooks/useFormDraft';
 import type {
   ChapterStatus,
   ChapterWithVolume,
@@ -121,31 +122,48 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
     }));
   }, [chapters, volumes, statusFilter, tagFilter]);
 
+  /*
+   * 弹窗表单的草稿。
+   *
+   * 编辑到一半切走页面再回来，内容还在；提交成功后自动清除。
+   */
+  const formDraft = useFormDraft({
+    scope: `${novelId}:chapters`,
+    targetId: editing?.id ?? null,
+    open: creating || editing !== null,
+    value: form,
+  });
+
   const openCreate = () => {
-    setForm({
-      // 标题留空由提交时按序号补，序号预填为下一个可用位置
-      title: '',
-      index: String(chapters.length + 1),
-      volumeId: volumes[volumes.length - 1]?.id ?? '',
-      direction: '',
-      eventId: '',
-      stepIndex: 0,
-      timelineSort: '',
-      status: 'planned',
-      tags: [],
-      tagDraft: '',
-    });
+    const cached = formDraft.restore('new');
+    setForm(
+      cached ?? {
+        // 标题留空由提交时按序号补，序号预填为下一个可用位置
+        title: '',
+        index: String(chapters.length + 1),
+        volumeId: volumes[volumes.length - 1]?.id ?? '',
+        direction: '',
+        eventId: '',
+        stepIndex: 0,
+        timelineSort: '',
+        status: 'planned',
+        tags: [],
+        tagDraft: '',
+      },
+    );
     setCreating(true);
   };
 
   const openEdit = (chapter: ChapterWithVolume) => {
-    setForm({
-      title: chapter.title,
-      index: String(chapter.indexNo),
-      volumeId: chapter.volumeId,
-      direction: chapter.direction,
-      eventId: chapter.eventId ?? '',
-      stepIndex: chapter.stepIndex ?? 0,
+    const cached = formDraft.restore(chapter.id);
+    setForm(
+      cached ?? {
+        title: chapter.title,
+        index: String(chapter.indexNo),
+        volumeId: chapter.volumeId,
+        direction: chapter.direction,
+        eventId: chapter.eventId ?? '',
+        stepIndex: chapter.stepIndex ?? 0,
       timelineSort: chapter.timelineSort ?? '',
       status: chapter.status,
       tags: (chapter.tags ?? []).map((tag) => tag.name),
@@ -172,6 +190,7 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
       }
       toast.success(t('common.saved'));
       setCreating(false);
+      formDraft.clear();
       await load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
@@ -194,6 +213,7 @@ export function ChaptersClient({ novelId }: { novelId: string }) {
       await api.patch(novelResourcePath(novelId, 'tags', editing.id), { tags: form.tags });
       toast.success(t('common.saved'));
       setEditing(null);
+      formDraft.clear();
       await load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('common.generateFailed'));

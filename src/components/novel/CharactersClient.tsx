@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { api, novelResourcePath } from '@/lib/client/api';
+import { useFormDraft } from '@/hooks/useFormDraft';
 import { useSettings } from '@/components/providers/SettingsProvider';
 import { useToast } from '@/components/ui/Toast';
 import { ConfirmDialog, Modal } from '@/components/ui/Modal';
@@ -81,13 +82,37 @@ export function CharactersClient({ novelId }: { novelId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [novelId]);
 
+  /*
+   * 弹窗表单的草稿。伏笔是独立状态，一并纳入缓存，
+   * 否则只留住基本字段、伏笔清单照样会丢。
+   */
+  const formDraft = useFormDraft({
+    scope: `${novelId}:characters`,
+    targetId: editing?.id ?? null,
+    open: creating || editing !== null,
+    value: { form, foreshadowing },
+  });
+
   const openCreate = () => {
-    setForm({ ...EMPTY_FORM });
-    setForeshadowing([]);
+    const cached = formDraft.restore('new');
+    if (cached) {
+      setForm(cached.form);
+      setForeshadowing(cached.foreshadowing);
+    } else {
+      setForm({ ...EMPTY_FORM });
+      setForeshadowing([]);
+    }
     setCreating(true);
   };
 
   const openEdit = (character: Character) => {
+    const cached = formDraft.restore(character.id);
+    if (cached) {
+      setForm(cached.form);
+      setForeshadowing(cached.foreshadowing);
+      setEditing(character);
+      return;
+    }
     setForm({
       name: character.name,
       aliases: character.aliases.join('，'),
@@ -131,6 +156,7 @@ export function CharactersClient({ novelId }: { novelId: string }) {
         setCreating(false);
       }
       toast.success(t('common.saved'));
+      formDraft.clear();
       await load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t('common.generateFailed'));

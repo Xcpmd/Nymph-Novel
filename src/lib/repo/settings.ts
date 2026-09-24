@@ -49,6 +49,7 @@ export const DEFAULT_RULES: GenerationRules = {
   forbidden: ['不使用括号补充说明', '不使用现代网络流行语', '不出现作者旁白式吐槽'],
   speechHabits: '每个角色的用词与句长应有区分度，主角说话简短直接。',
   extra: [],
+  outline: '',
 };
 
 export const DEFAULT_PREFERENCES: NovelPreferences = {
@@ -60,6 +61,8 @@ export const DEFAULT_PREFERENCES: NovelPreferences = {
   autoAdvanceEvent: true,
   autoExtractSettings: true,
   allowEventRecall: true,
+  /** 空数组表示不设限，全部上下文层都参与 */
+  contextLayers: [],
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -137,6 +140,8 @@ export function getNovelPreferences(novelId: string): NovelPreferences {
     ...map,
     rules: { ...DEFAULT_RULES, ...rules },
     budget: { ...DEFAULT_BUDGET, ...budget },
+    // 旧数据没有这一项，缺省视为未设限，即全部层都参与
+    contextLayers: Array.isArray(map.contextLayers) ? (map.contextLayers as string[]) : [],
   } as NovelPreferences;
 }
 

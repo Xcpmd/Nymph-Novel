@@ -811,17 +811,44 @@ export function renumberChapters(volumeId: string): void {
     )
     .all(volumeId) as Array<{ id: string; index_no: number; rel_path: string }>;
 
+  /*
+   * 废案章必须一并挪开。
+   *
+   * 正常章重排后序号从 1 开始，而废案章如果还占着正数序号，
+   * 就会正好压在目标位置上，撞 UNIQUE(volume_id, index_no) 报错。
+   * 历史数据里确实存在这种情形：废案章的序号停在 1 到 N，没有落进负数保留区。
+   */
+  const scrapped = getDb()
+    .prepare(
+      `SELECT id FROM chapters WHERE volume_id = ? AND status = 'scrapped' ORDER BY index_no`,
+    )
+    .all(volumeId) as Array<{ id: string }>;
+
   transact(() => {
-    // 先用负序号占位，避开 UNIQUE(volume_id, index_no)
+    /*
+     * 第一步把同卷全部章节挪进负数暂存区。
+     * 正常章与废案章各占一段，避免两组目标序号互相交叉时中途撞车。
+     */
     rows.forEach((row, position) => {
+      getDb().prepare('UPDATE chapters SET index_no = ? WHERE id = ?').run(-(position + 1), row.id);
+    });
+    scrapped.forEach((row, position) => {
       getDb()
         .prepare('UPDATE chapters SET index_no = ? WHERE id = ?')
-        .run(-(position + 1), row.id);
+        .run(-(rows.length + position + 1), row.id);
     });
+
+    // 第二步各自落到最终位置
     rows.forEach((row, position) => {
       getDb()
         .prepare('UPDATE chapters SET index_no = ?, rel_path = ? WHERE id = ?')
         .run(position + 1, buildRelPath(volume.indexNo, position + 1), row.id);
+    });
+    // 废案章的负数序号只是唯一标识，原位置另由 original_index_no 记录
+    scrapped.forEach((row, position) => {
+      getDb()
+        .prepare('UPDATE chapters SET index_no = ? WHERE id = ?')
+        .run(-(SCRAPPED_INDEX_OFFSET + position + 1), row.id);
     });
   });
 

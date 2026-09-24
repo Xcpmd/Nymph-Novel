@@ -107,6 +107,8 @@ const generateSchema = z.object({
    * 由界面给出二次确认按钮。
    */
   confirmOverBudget: z.boolean().optional(),
+  /** 本次要写第几步，从 0 开始。缺省跟随事件进度 */
+  stepIndex: z.number().int().min(0).optional(),
   maxTokens: z.number().int().positive().optional(),
 });
 
@@ -189,6 +191,10 @@ export async function POST(request: Request): Promise<Response> {
     eventId: currentEvent?.id,
     pinnedChapterIds: Array.from(recalledChapterIds),
     allowTrim: !overBudgetConfirmed,
+    // 用户在「本次上下文」里勾选的层，顺序即注入顺序
+    layerKeys: preferences.contextLayers,
+    // 用户在第三步指定的步骤，缺省跟随事件进度
+    stepIndex: parsed.stepIndex,
   });
 
   if (!overBudgetConfirmed && bundle.trimmed) {

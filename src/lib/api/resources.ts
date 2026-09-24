@@ -100,7 +100,7 @@ import {
 import { getNovelDiskUsage } from '../store/chapter-files';
 import { isSetupFileKey, writeSetupFile } from '../store/setup-files';
 import { deriveEventTitle, deriveStepsFromOutline } from '../markdown/outline';
-import { buildContext } from '../ai/context';
+import { buildContext, CONTEXT_LAYER_CATALOG } from '../ai/context';
 import type {
   Character,
   CharacterRole,
@@ -364,6 +364,10 @@ export const RESOURCES: Record<string, ResourceDefinition> = {
         arc: asString(body.arc),
         tags: asStringArray(body.tags),
         notes: asString(body.notes),
+        // 伏笔原先只能事后编辑，新建时传的值会被丢掉，这里补齐
+        foreshadowing: Array.isArray(body.foreshadowing)
+          ? (body.foreshadowing as Character['foreshadowing'])
+          : undefined,
         isPrimary: asBool(body.isPrimary),
         speechHue: asInt(body.speechHue, 0, 359),
         speechColorMode: asEnum(body.speechColorMode, ['auto', 'manual'] as const),
@@ -429,6 +433,17 @@ export const RESOURCES: Record<string, ResourceDefinition> = {
       deleteRelation(itemId);
       return { ok: true };
     },
+  },
+
+  /*
+   * 上下文的层清单。
+   *
+   * 只回名称与用途，具体内容随生成过程产生。
+   * 界面据此让用户勾选要发送哪些层，并调整注入顺序。
+   */
+  'context-layers': {
+    label: '上下文层',
+    list: () => ({ layers: CONTEXT_LAYER_CATALOG }),
   },
 
   /*
@@ -658,6 +673,10 @@ export const RESOURCES: Record<string, ResourceDefinition> = {
       }
       if (body.rules !== undefined) patch.rules = body.rules;
       if (body.budget !== undefined) patch.budget = body.budget;
+      // 上下文层是字符串数组，单独校验后再写入
+      if (body.contextLayers !== undefined) {
+        patch.contextLayers = asStringArray(body.contextLayers);
+      }
       if (Object.keys(patch).length > 0) {
         updateNovelPreferences(novelId, patch);
       }
