@@ -154,17 +154,25 @@ export function useGeneration() {
   const [saved, setSaved] = useState<{ chapterId: string; wordCount: number } | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
+  /** 推理模型的思考过程，仅用于展示，不进入正文 */
+  const [reasoning, setReasoning] = useState('');
+  /** 因输出上限被截断时的提示 */
+  const [truncated, setTruncated] = useState<string | null>(null);
   /** 上下文超出预算时的提示，界面据此给出二次确认 */
   const [budgetExceeded, setBudgetExceeded] = useState<BudgetExceededInfo | null>(null);
 
   const controllerRef = useRef<AbortController | null>(null);
   const lastRequestRef = useRef<GenerationRequest | null>(null);
   const bufferRef = useRef('');
+  const reasoningRef = useRef('');
+  /** 本轮是否因输出上限被截断，供调用方在流结束后读取 */
+  const truncatedRef = useRef(false);
 
   const reset = useCallback(() => {
     controllerRef.current?.abort();
     controllerRef.current = null;
     bufferRef.current = '';
+    reasoningRef.current = '';
     setStatus('idle');
     setText('');
     setMeta(null);
@@ -178,10 +186,16 @@ export function useGeneration() {
     setSaved(null);
     setMessage('');
     setError(null);
+    setReasoning('');
+    setTruncated(null);
     setBudgetExceeded(null);
   }, []);
 
-  const start = useCallback(async (payload: GenerationRequest, keepExisting = false) => {
+  const start = useCallback(
+    async (
+      payload: GenerationRequest,
+      keepExisting = false,
+    ): Promise<{ text: string; error: string | null; truncated: boolean }> => {
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -189,6 +203,8 @@ export function useGeneration() {
     lastRequestRef.current = payload;
     if (!keepExisting) {
       bufferRef.current = '';
+      reasoningRef.current = '';
+      truncatedRef.current = false;
       setText('');
       setMeta(null);
       setUsage(null);
@@ -199,6 +215,8 @@ export function useGeneration() {
       setRecalls([]);
       setStructured(null);
       setSaved(null);
+      setReasoning('');
+      setTruncated(null);
       setBudgetExceeded(null);
     }
     setError(null);
@@ -224,7 +242,7 @@ export function useGeneration() {
         }
         setStatus('error');
         setError(parsedMessage);
-        return;
+        return { text: '', error: parsedMessage, truncated: false };
       }
 
       const reader = response.body.getReader();
@@ -266,6 +284,17 @@ export function useGeneration() {
               setText(bufferRef.current);
               break;
             }
+            case 'reasoning': {
+              // 思考过程单独累积，正文区不受影响
+              const piece = (data as { text: string }).text;
+              reasoningRef.current += piece;
+              setReasoning(reasoningRef.current);
+              break;
+            }
+            case 'truncated':
+              truncatedRef.current = true;
+              setTruncated((data as { message: string }).message);
+              break;
             case 'usage':
               setUsage(data as GenerationUsage);
               break;
@@ -316,16 +345,35 @@ export function useGeneration() {
       if (controller.signal.aborted) {
         setStatus('paused');
       } else {
+        /*
+         * 正文一个字都没有却收到结束信号，属于异常完成。
+         *
+         * 这种情况多半是模型把额度全用在思考上，或者上游格式不兼容导致增量被丢。
+         * 标成错误并给出可操作的提示，总好过让界面显示「生成完成」而内容区一片空白。
+         */
+        if (!bufferRef.current.trim()) {
+          const fallback = reasoningRef.current
+            ? '模型本次只输出了思考过程，没有产出正文。请调高最大输出长度，或改用非推理模型。'
+            : '模型本次没有返回任何正文。请重试，或检查该模型是否支持流式输出。';
+          setStatus('error');
+          setError((existing) => existing ?? fallback);
+          return { text: '', error: fallback, truncated: false };
+        }
         setStatus((current) => (current === 'error' ? 'error' : 'done'));
       }
     } catch (caught) {
       if (controller.signal.aborted) {
         setStatus('paused');
-      } else {
-        setStatus('error');
-        setError(caught instanceof Error ? caught.message : '生成失败');
+        return { text: bufferRef.current, error: null, truncated: false };
       }
+      const message = caught instanceof Error ? caught.message : '生成失败';
+      setStatus('error');
+      setError(message);
+      return { text: bufferRef.current, error: message, truncated: false };
     }
+
+    // 把本轮结果直接交回调用方，连续生成据此落库，不依赖 React 状态更新时机
+    return { text: bufferRef.current, error: null, truncated: truncatedRef.current };
   }, []);
 
   /** 暂停当前生成。服务端会把已生成内容写入任务记录，便于续接。 */
@@ -375,6 +423,8 @@ export function useGeneration() {
     saved,
     message,
     error,
+    reasoning,
+    truncated,
     budgetExceeded,
     start,
     pause,

@@ -1,7 +1,9 @@
 import { getDb, now, parseJson, transact } from '../db';
 import { decryptSecret, encryptSecret, maskSecret, shortId } from '../crypto';
+import { createLog, listLogs, pruneLogs, readLog, updateLog } from '../store/generation-log';
 import type {
   Bookmark,
+  GenerationRun,
   ModelParams,
   PromptTemplate,
   Provider,
@@ -601,47 +603,18 @@ export function summarizeUsage(novelId?: string): {
 
 /* ------------------------------------------------------ 生成任务记录 */
 
-export interface GenerationRun {
-  id: string;
-  novelId: string;
-  chapterId: string | null;
-  taskType: TaskType;
-  providerId: string | null;
-  model: string;
-  status: 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
-  requestJson: string;
-  /** 实际发给模型的消息全文，供请求日志查看 */
-  promptText: string;
-  /** 模型输出全文 */
-  partialText: string;
-  /** token 用量与耗时，JSON 字符串 */
-  usageJson: string;
-  error: string;
-  createdAt: string;
-  updatedAt: string;
-}
+/*
+ * GenerationRun 已移到公共类型里 —— 日志改为文件存储后，
+ * 文件层与仓储层都要用到这个类型，留在这里会让文件层反向依赖仓储层。
+ */
 
-/** 把数据库行转成记录对象，三处查询共用。 */
-function mapRun(row: Record<string, unknown>): GenerationRun {
-  return {
-    id: String(row.id),
-    novelId: String(row.novel_id),
-    chapterId: (row.chapter_id as string | null) ?? null,
-    taskType: row.task_type as TaskType,
-    providerId: (row.provider_id as string | null) ?? null,
-    model: String(row.model ?? ''),
-    status: row.status as GenerationRun['status'],
-    requestJson: String(row.request_json ?? '{}'),
-    promptText: String(row.prompt_text ?? ''),
-    partialText: String(row.partial_text ?? ''),
-    usageJson: String(row.usage_json ?? ''),
-    error: String(row.error ?? ''),
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at),
-  };
-}
-
-/** 创建生成任务记录，用于暂停后恢复，同时留作请求日志。 */
+/**
+ * 生成任务记录。
+ *
+ * 存储已迁到文件层：一条日志一个 txt，落在 data/logs 下按日期分目录。
+ * 这里保留原有函数名，调用方不必关心底层换成了什么 ——
+ * 日志是诊断材料，不该跟小说内容挤在同一个库里。
+ */
 export function createRun(input: {
   novelId: string;
   chapterId?: string | null;
@@ -652,27 +625,7 @@ export function createRun(input: {
   /** 发给模型的完整消息，便于事后核对上下文 */
   promptText?: string;
 }): string {
-  const id = shortId('run');
-  const timestamp = now();
-  getDb()
-    .prepare(
-      `INSERT INTO generation_runs (id, novel_id, chapter_id, task_type, provider_id, model,
-         status, request_json, prompt_text, partial_text, usage_json, error, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, '', '', '', ?, ?)`,
-    )
-    .run(
-      id,
-      input.novelId,
-      input.chapterId ?? null,
-      input.taskType,
-      input.providerId ?? null,
-      input.model ?? '',
-      JSON.stringify(input.request ?? {}),
-      input.promptText ?? '',
-      timestamp,
-      timestamp,
-    );
-  return id;
+  return createLog(input);
 }
 
 /** 更新生成任务状态与已生成内容。 */
@@ -686,44 +639,20 @@ export function updateRun(
     usageJson?: string;
   },
 ): void {
-  const fields: string[] = [];
-  const values: unknown[] = [];
-  const assign = (column: string, value: unknown) => {
-    fields.push(`${column} = ?`);
-    values.push(value);
-  };
-  if (patch.status !== undefined) assign('status', patch.status);
-  if (patch.partialText !== undefined) assign('partial_text', patch.partialText);
-  if (patch.error !== undefined) assign('error', patch.error);
-  if (patch.promptText !== undefined) assign('prompt_text', patch.promptText);
-  if (patch.usageJson !== undefined) assign('usage_json', patch.usageJson);
-  if (fields.length === 0) return;
-  assign('updated_at', now());
-  values.push(runId);
-  getDb()
-    .prepare(`UPDATE generation_runs SET ${fields.join(', ')} WHERE id = ?`)
-    .run(...values);
+  updateLog(runId, patch);
 }
 
 /** 读取生成任务。 */
 export function getRun(runId: string): GenerationRun | null {
-  const row = getDb().prepare('SELECT * FROM generation_runs WHERE id = ?').get(runId) as
-    | Record<string, unknown>
-    | undefined;
-  return row ? mapRun(row) : null;
+  return readLog(runId);
 }
 
 /** 列出小说下最近的生成任务。 */
 export function listRuns(novelId: string, limit = 30): GenerationRun[] {
-  const rows = getDb()
-    .prepare('SELECT * FROM generation_runs WHERE novel_id = ? ORDER BY created_at DESC LIMIT ?')
-    .all(novelId, limit) as Array<Record<string, unknown>>;
-  return rows.map(mapRun);
+  return listLogs(novelId, limit);
 }
 
 /** 清理超过指定天数的生成任务记录。 */
 export function pruneRuns(olderThanDays = 14): number {
-  const cutoff = new Date(Date.now() - olderThanDays * 86400_000).toISOString();
-  const result = getDb().prepare('DELETE FROM generation_runs WHERE created_at < ?').run(cutoff);
-  return result.changes;
+  return pruneLogs(olderThanDays);
 }

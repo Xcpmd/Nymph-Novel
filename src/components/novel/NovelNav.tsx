@@ -15,6 +15,8 @@ const ITEMS: Array<{ segment: string; icon: string; labelKey: string }> = [
   { segment: 'events', icon: 'fa-solid fa-flag', labelKey: 'nav.events' },
   { segment: 'outline', icon: 'fa-solid fa-diagram-project', labelKey: 'nav.outline' },
   { segment: 'chapters', icon: 'fa-solid fa-list-ol', labelKey: 'nav.chapters' },
+  // 阅读放在章节目录之后：先看到目录，再沉进正文
+  { segment: 'read', icon: 'fa-solid fa-book-open-reader', labelKey: 'nav.read' },
   { segment: 'characters', icon: 'fa-solid fa-users', labelKey: 'nav.characters' },
   { segment: 'relations', icon: 'fa-solid fa-share-nodes', labelKey: 'nav.relations' },
   { segment: 'encyclopedia', icon: 'fa-solid fa-book-atlas', labelKey: 'nav.encyclopedia' },

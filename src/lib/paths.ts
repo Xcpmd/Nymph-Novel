@@ -24,6 +24,36 @@ export function novelDir(novelId: string): string {
 }
 
 /**
+ * 某部小说的封面文件。
+ *
+ * 封面是图片，以 base64 存进数据库会让一个字段就占掉几十万字节，
+ * 而它本来就是一个文件。因此正文、封面、结构化数据都归到小说自己的目录下，
+ * 整部小说可以作为一个整体打包或搬走。
+ */
+export function novelCoverFile(novelId: string): string {
+  return path.join(novelDir(novelId), COVER_FILE_NAME);
+}
+
+/** 封面文件名。 */
+export const COVER_FILE_NAME = 'cover.png';
+
+/** 某部小说的独立数据库文件。 */
+export function novelDbFile(novelId: string): string {
+  return path.join(novelDir(novelId), NOVEL_DB_FILE_NAME);
+}
+
+/** 每部小说的数据库文件名。 */
+export const NOVEL_DB_FILE_NAME = 'novel.db';
+
+/**
+ * 请求日志目录。
+ *
+ * 日志是诊断用的，与小说内容无关，因此放在数据根目录下单独一处，
+ * 既不进小说的库，也不随小说一起搬走。
+ */
+export const LOG_DIR = path.join(DATA_DIR, 'logs');
+
+/**
  * 按需求文档固定目录结构生成路径：
  * novel/{novelId}/vol-001/ch-001/正文.md
  *

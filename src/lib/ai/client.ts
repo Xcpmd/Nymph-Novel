@@ -80,8 +80,10 @@ export interface UsageReport {
 
 export type StreamChunk =
   | { type: 'delta'; text: string }
+  /** 推理模型的思考过程，只用于界面展示，不进入正文 */
+  | { type: 'reasoning'; text: string }
   | { type: 'usage'; usage: UsageReport }
-  | { type: 'done'; text: string; usage: UsageReport }
+  | { type: 'done'; text: string; usage: UsageReport; finishReason?: string }
   | { type: 'error'; message: string };
 
 function buildBody(request: ChatRequest, resolved: ResolvedModel, stream: boolean): Record<string, unknown> {
@@ -115,6 +117,70 @@ function buildHeaders(resolved: ResolvedModel): Record<string, string> {
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 一帧 SSE 数据解析出的内容。空帧返回 null。 */
+export interface ParsedStreamLine {
+  /** 正文增量 */
+  content: string;
+  /** 推理过程增量，正文之外的思考内容 */
+  reasoning: string;
+  /** 结束原因，`length` 表示撞到输出上限被截断 */
+  finishReason?: string;
+  /** 本次携带的用量 */
+  usage?: UsageReport;
+}
+
+/**
+ * 解析一行 SSE 数据。
+ *
+ * 单独抽出来是因为这里踩过一次很隐蔽的坑：OpenAI 兼容协议下，
+ * 推理模型把思考过程放在 `reasoning_content`，此时 `content` 是 null。
+ * 只读 `content` 会把整条流全部丢弃，而 `usage` 仍照常返回，
+ * 上层于是把「一个字都没有」记成「生成完成」。
+ */
+export function parseStreamLine(rawLine: string): ParsedStreamLine | null {
+  const line = rawLine.trim();
+  if (!line || !line.startsWith('data:')) return null;
+  const payload = line.slice(5).trim();
+  if (!payload || payload === '[DONE]') return null;
+
+  try {
+    const parsed = JSON.parse(payload) as {
+      choices?: Array<{
+        delta?: { content?: string | null; reasoning_content?: string | null };
+        finish_reason?: string | null;
+      }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+      };
+    };
+    const choice = parsed.choices?.[0];
+    const result: ParsedStreamLine = {
+      content: typeof choice?.delta?.content === 'string' ? choice.delta.content : '',
+      reasoning:
+        typeof choice?.delta?.reasoning_content === 'string' ? choice.delta.reasoning_content : '',
+    };
+    if (typeof choice?.finish_reason === 'string' && choice.finish_reason) {
+      result.finishReason = choice.finish_reason;
+    }
+    if (parsed.usage) {
+      result.usage = {
+        promptTokens: parsed.usage.prompt_tokens ?? 0,
+        completionTokens: parsed.usage.completion_tokens ?? 0,
+        totalTokens:
+          parsed.usage.total_tokens ??
+          (parsed.usage.prompt_tokens ?? 0) + (parsed.usage.completion_tokens ?? 0),
+        estimated: false,
+      };
+    }
+    return result;
+  } catch {
+    // 兼容接口偶尔会输出非 JSON 的心跳行，忽略即可
+    return null;
+  }
 }
 
 /**
@@ -180,6 +246,15 @@ export async function* chatStream(request: ChatRequest): AsyncGenerator<StreamCh
     let buffer = '';
     let full = '';
     let usage: UsageReport | null = null;
+    /**
+     * 上游给出的结束原因。
+     *
+     * `length` 表示撞到 max_tokens 被硬截断，正文可能根本没开始写，
+     * 必须让调用方拿到这个信号，否则会把「被截断」当成「已完成」。
+     */
+    let finishReason: string | undefined;
+    /** 本次是否有任何推理增量，用于判断 8192 个 token 是不是全烧在思考上 */
+    let reasoningChars = 0;
 
     while (true) {
       let chunk: ReadableStreamReadResult<Uint8Array>;
@@ -195,7 +270,7 @@ export async function* chatStream(request: ChatRequest): AsyncGenerator<StreamCh
               estimateTokens(full),
             estimated: true,
           };
-          yield { type: 'done', text: full, usage: finalUsage };
+          yield { type: 'done', text: full, usage: finalUsage, finishReason };
           return;
         }
         yield { type: 'error', message: error instanceof Error ? error.message : '读取响应流失败' };
@@ -208,38 +283,40 @@ export async function* chatStream(request: ChatRequest): AsyncGenerator<StreamCh
       buffer = lines.pop() ?? '';
 
       for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line || !line.startsWith('data:')) continue;
-        const payload = line.slice(5).trim();
-        if (payload === '[DONE]') continue;
-        try {
-          const parsed = JSON.parse(payload) as {
-            choices?: Array<{ delta?: { content?: string | null; reasoning_content?: string | null } }>;
-            usage?: {
-              prompt_tokens?: number;
-              completion_tokens?: number;
-              total_tokens?: number;
-            };
-          };
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (typeof delta === 'string' && delta.length > 0) {
-            full += delta;
-            yield { type: 'delta', text: delta };
-          }
-          if (parsed.usage) {
-            usage = {
-              promptTokens: parsed.usage.prompt_tokens ?? 0,
-              completionTokens: parsed.usage.completion_tokens ?? 0,
-              totalTokens:
-                parsed.usage.total_tokens ??
-                (parsed.usage.prompt_tokens ?? 0) + (parsed.usage.completion_tokens ?? 0),
-              estimated: false,
-            };
-          }
-        } catch {
-          // 兼容接口偶尔会输出非 JSON 的心跳行，忽略即可
+        const piece = parseStreamLine(rawLine);
+        if (!piece) continue;
+        if (piece.content) {
+          full += piece.content;
+          yield { type: 'delta', text: piece.content };
         }
+        /*
+         * 推理模型会把思考过程写在 reasoning_content 里，此时 content 为 null。
+         *
+         * 只读 content 会让整段思考连同后续正文一起被丢掉：
+         * 曾经出现的「显示生成完成但内容区一片空白」就是这么来的——
+         * 模型把额度全花在思考上，content 始终为空，而 usage 照常回传，
+         * 界面据此判定成功，用户白付了 token。
+         */
+        if (piece.reasoning) {
+          reasoningChars += piece.reasoning.length;
+          yield { type: 'reasoning', text: piece.reasoning };
+        }
+        if (piece.finishReason) finishReason = piece.finishReason;
+        if (piece.usage) usage = piece.usage;
       }
+    }
+
+    /*
+     * 正文为空却有推理内容，说明额度被思考耗尽。
+     * 转成一条明确的错误，避免上层把这种情况记成成功。
+     */
+    if (!full && reasoningChars > 0) {
+      const reason =
+        finishReason === 'length'
+          ? `模型把本次输出额度全部用于思考过程，未产出正文。请调高最大输出长度，或改用非推理模型。`
+          : `模型只返回了思考过程，未产出正文。请重试或改用非推理模型。`;
+      yield { type: 'error', message: reason };
+      return;
     }
 
     const promptTokens = estimateTokens(
@@ -253,7 +330,7 @@ export async function* chatStream(request: ChatRequest): AsyncGenerator<StreamCh
         totalTokens: promptTokens + estimateTokens(full),
         estimated: true,
       };
-    yield { type: 'done', text: full, usage: finalUsage };
+    yield { type: 'done', text: full, usage: finalUsage, finishReason };
     return;
   }
 

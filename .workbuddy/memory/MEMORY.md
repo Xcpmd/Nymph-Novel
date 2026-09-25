@@ -8,6 +8,10 @@ AI 网络小说生成与管理工具。单用户、纯本地运行，不部署�
 ## 架构约定
 
 - 结构化数据进 SQLite，正文只进 Markdown 文件，两者不混用。
+- **推理模型的流式增量必须同时读 `content` 与 `reasoning_content`。** 实测 `deepseek-flash` 的帧为 `{"delta":{"content":null,"reasoning_content":"..."}}`，`content` 在全思考阶段恒为 `null`。只读 `content` 会让整条流被静默丢弃，而 `usage` 与结束信号照常返回，上层于是判定成功——表现就是「显示生成完成但内容区一片空白，token 已烧掉」。解析入口是 `client.ts` 的 `parseStreamLine`，两路增量分别以 `delta` 与 `reasoning` 事件下发。
+- **`finish_reason: "length"` 必须当成异常处理，不能走完成分支。** 推理模型会把 `max_tokens` 全花在思考上（`completion_tokens_details.reasoning_tokens` 等于总量），正文一字未写就被截断。服务端据此发 `truncated` 事件，`useGeneration` 在正文为空时强制置为 `error`。
+- **`useGeneration.start` 返回 `{ text, error, truncated }`**，调用方要在生成结束后立即取正文的（例如连续生成）必须用返回值，读 `generation.text` 拿到的是渲染闭包里的旧 state。
+- 连续生成章节必须**串行**：后续章节的「上一章正文」层依赖前一章已落库，并发发出时每章都指向同一章，内容会互相重叠。
 - **磁盘路径一律使用拉丁字符，禁止出现中文。** 中文目录名在跨平台迁移、压缩打包、命令行工具处理时容易遇到编码问题，界面展示需要的中文由 i18n 层翻译。
 - 正文路径固定为 `data/novel/{novelId}/vol-XXX/ch-YYY/content.md`，设定文件固定为 `data/novel/{novelId}/setup/{key}.md`，全部由 `src/lib/paths.ts` 与 `src/lib/store/setup-files.ts` 统一生成，任何地方都不许硬编码目录名。
 - 历史中文路径的兼容由 `legacyVolumeDirName`、`legacyChapterRelPath`、`normalizeContentRelPath` 一族函数承担。磁盘上的旧目录由 `migrateChapterDirsOnDisk` 在**每次启动**时幂等搬迁，不能只在迁移循环里跑一次，否则版本号推进后新出现的旧目录再也搬不动。
@@ -22,6 +26,8 @@ AI 网络小说生成与管理工具。单用户、纯本地运行，不部署�
 - **章节废案把原位置存在 `original_index_no`，不要靠 `index_no` 反推**。早期实现用 `-(100000 + 原序号)` 编码，同卷两次废同一位置会撞唯一约束导致失败。
 - **废案章的 `index_no` 必须落在 `<= -SCRAPPED_INDEX_OFFSET` 的负数保留区**，与正常章的正序号彻底隔离。只让正常章参与重排是不够的：废案章若停在正数区，重排写回时就会压在目标位置上撞唯一约束。`renumberChapters` 现在把两组一起搬移，迁移 v11 负责修正历史数据。
 - **直接改库后要 `wal_checkpoint(TRUNCATE)` 再验证**，否则读到的仍是旧快照，会误判成改动没生效。
+- 阅读页在 `/novels/{novelId}/read`，三种模式共用同一份正文数据。分页靠 CSS 多列加横向位移，列宽与步长按视口实测写入 CSS 变量；滚动模式把相邻章拼成连续文档。
+- **判断客户端渲染的页面是否正常，curl 会误判**：服务端只输出加载态。要用无头浏览器 `--dump-dom` 加 `--virtual-time-budget` 取渲染后的 DOM。
 - **批量调整章节文件位置必须走 `relocateChapterFiles`**。按顺序逐个改名会互相覆盖（后者常占着前者的目标路径），先统一改到卷目录下的临时名再落到目标位置。
 - 章节相关接口的更新分支统一返回 `{ chapter, chapters }`，不要有分支返回裸 chapter，否则调用方与测试都要做特例判断。
 - 工作台流程：方向（手写或 AI）一律先进入「检视并修改故事大纲」，不要跳过大纲直接建事件，否则推进步骤缺骨架。大纲到章节的转换是第二步里的显式按钮，不自动执行。

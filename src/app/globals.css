@@ -869,6 +869,83 @@ body {
 }
 
 /*
+ * 阅读页的分页视图。
+ *
+ * 用 CSS 多列把正文切成等宽的一页页：容器宽固定为一页、高度受限，
+ * 内容便自然向右溢出成多列，再整体横向位移实现翻页。
+ * 列宽与步长由脚本按视口实测写入 CSS 变量，窗口变化时页数会跟着重算。
+ */
+.reader-viewport {
+  position: relative;
+  height: min(78vh, 54rem);
+  overflow: hidden;
+  padding: 2rem 0 3.5rem;
+  cursor: pointer;
+}
+
+.reader-pages {
+  height: 100%;
+  width: var(--page-width, 40rem);
+  margin: 0 auto;
+  column-width: var(--page-width, 40rem);
+  column-gap: var(--page-gap, 2.5rem);
+  column-fill: auto;
+}
+
+/* 只有带动画的模式才加过渡，无动画翻页要求瞬时到位 */
+.reader-pages-animated {
+  transition: transform 300ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.reader-pager {
+  position: absolute;
+  right: 1.25rem;
+  bottom: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  padding: 0.25rem 0.6rem;
+  cursor: default;
+}
+
+/*
+ * 上下无缝滑动。
+ *
+ * 章节在同一个滚动容器里首尾相接，中间只用一条细分隔线，
+ * 不做整页分隔 —— 翻页感会打断连续阅读的节奏。
+ */
+.reader-scroll {
+  height: min(78vh, 54rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2.5rem 2.75rem 4rem;
+}
+
+.reader-section + .reader-section {
+  margin-top: 3rem;
+  padding-top: 2.25rem;
+  border-top: 1px solid var(--glass-border);
+}
+
+.reader-section-title {
+  margin-bottom: 1.25rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  opacity: 0.55;
+}
+
+.reader-pages .prose-novel,
+.reader-scroll .prose-novel {
+  font-size: var(--reader-font-size);
+}
+
+/*
  * 竖版封面卡。
  *
  * 常态只呈现封面本身，书名与作者等元信息收进悬浮层，

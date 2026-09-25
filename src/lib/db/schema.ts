@@ -5,6 +5,10 @@
  * 新增结构时在数组末尾追加一个版本，不要修改已发布版本的内容。
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { NOVEL_ROOT } from '../paths';
+
 export interface Migration {
   version: number;
   name: string;
@@ -586,6 +590,50 @@ export const MIGRATIONS: Migration[] = [
           );
         });
       }
+    },
+  },
+  {
+    version: 12,
+    name: '封面拆出为小说目录下的图片文件',
+    statements: [],
+    run: (db) => {
+      /*
+       * 封面原先以 base64 整串存在 novels.cover_image 里，一行就能占掉几十万字节，
+       * 而它本来就是一个图片文件。这里把它落成 data/novel/{id}/cover.png 并清空字段，
+       * 之后小说目录自带封面，整部作品可以作为一个目录搬走。
+       *
+       * 读写文件属于存储层的职责，但迁移要能在任何阶段独立跑完，
+       * 因此直接在这里写盘，不反向依赖仓储层。
+       */
+      const rows = db
+        .prepare(`SELECT id, cover_image FROM novels WHERE cover_image LIKE 'data:%'`)
+        .all() as Array<{ id: string; cover_image: string }>;
+      if (rows.length === 0) return;
+
+      let written = 0;
+      for (const row of rows) {
+        const match = /^data:([^;,]+);base64,(.*)$/su.exec(row.cover_image.trim());
+        if (!match) continue;
+        try {
+          const dir = path.join(NOVEL_ROOT, row.id);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'cover.png'), Buffer.from(match[2] ?? '', 'base64'));
+          written += 1;
+        } catch (error) {
+          // 单个封面写失败不该拦住整次迁移，字段保留以便下次重试
+          console.warn(
+            `[nymph] 封面迁移失败，已跳过：${row.id} ${
+              error instanceof Error ? error.message : ''
+            }`,
+          );
+        }
+      }
+      // 只清成功落盘的那些，失败的原样留着
+      const placeholders = rows.map(() => '?').join(', ');
+      db.prepare(`UPDATE novels SET cover_image = '' WHERE id IN (${placeholders})`).run(
+        ...rows.map((row) => row.id),
+      );
+      console.log(`[nymph] 已把 ${written} 张封面从数据库拆出到小说目录`);
     },
   },
 ];

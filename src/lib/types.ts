@@ -126,6 +126,33 @@ export interface Character {
 
 export type SpeechColorMode = 'auto' | 'manual';
 
+/**
+ * 一次生成请求的记录。
+ *
+ * 这类记录已改为按条落成 txt 文件，放在 data/logs 下。
+ * 类型放在公共类型里，是因为文件存储层与仓储层都要用到它，
+ * 留在一侧会让另一侧产生反向依赖。
+ */
+export interface GenerationRun {
+  id: string;
+  novelId: string;
+  chapterId: string | null;
+  taskType: TaskType;
+  providerId: string | null;
+  model: string;
+  status: 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
+  requestJson: string;
+  /** 实际发给模型的消息全文，供请求日志查看 */
+  promptText: string;
+  /** 模型输出全文 */
+  partialText: string;
+  /** token 用量与耗时，JSON 字符串 */
+  usageJson: string;
+  error: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type RelationKind =
   | 'family'
   | 'lover'

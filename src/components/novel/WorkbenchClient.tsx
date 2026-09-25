@@ -22,7 +22,7 @@ import { ContextInspector } from './ContextInspector';
 import { BudgetConfirmPrompt } from './BudgetConfirmPrompt';
 import { useGeneration } from '@/hooks/useGeneration';
 import { useDraftState } from '@/hooks/useDraftState';
-import { normalizeOptionList } from '@/lib/ai/prompts';
+import { normalizeOptionList, parseStepStatus } from '@/lib/ai/prompts';
 import { buildSpeakerColors } from '@/lib/markdown/speakers';
 import { deriveStepsFromOutline } from '@/lib/markdown/outline';
 import { countWords } from '@/lib/token';
@@ -499,6 +499,130 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
         (!activeEvent || activeEvent.progress === effectiveStepIndex),
       autoExtractSettings: preferences?.autoExtractSettings ?? true,
     });
+  };
+
+  /*
+   * 计划性连续生成。
+   *
+   * 逐章串行推进：每章生成完先落库，再读回最新的章节列表与事件进度，
+   * 用下一章作为新的目标重新发起一次生成。
+   *
+   * 必须串行而不能并发，原因是后续章节依赖前面章节的正文与推进后的进度：
+   * 并发发出时每一章拿到的都是同一份旧上下文，「上一章正文」这一层会指向同一章，
+   * 写出来的内容会互相重叠。
+   */
+  const planAbortRef = useRef(false);
+  const [planCount, setPlanCount] = useState(3);
+  const [planProgress, setPlanProgress] = useState<{ done: number; total: number } | null>(null);
+
+  /**
+   * 取章节正文写入章节，供连续生成在每章结束后落库。
+   *
+   * 与手工保存走同一接口，但这里不做确认弹窗，也不清空生成结果，
+   * 下一轮生成开始时会由生成钩子自行重置。
+   */
+  const persistChapterOutput = useCallback(
+    async (targetChapterId: string, content: string) => {
+      await api.patch(novelResourcePath(novelId, 'chapters', targetChapterId), {
+        content,
+        markGenerated: true,
+      });
+    },
+    [novelId],
+  );
+
+  /**
+   * 连续生成到指定章数。
+   *
+   * 每一轮都重新读一遍事件与章节，确保「上一章正文」层指向的是刚写好的那一章。
+   */
+  const generatePlan = async () => {
+    if (!activeEvent) {
+      toast.error(t('workbench.noEventHint'));
+      return;
+    }
+    const total = Math.max(1, Math.min(50, planCount));
+    planAbortRef.current = false;
+    setPlanProgress({ done: 0, total });
+    setStep('chapter');
+
+    // 本轮连续生成固定推进同一个事件，步骤序号逐轮更新
+    const currentEventId = activeEvent.id;
+    let currentStepIndex = effectiveStepIndex;
+
+    try {
+      for (let index = 0; index < total; index += 1) {
+        if (planAbortRef.current) break;
+
+        // 每轮都建一章，避免把整轮结果写进同一章
+        const chapter = await api.post<{ chapter: ChapterWithVolume }>(
+          novelResourcePath(novelId, 'chapters'),
+          {
+            title: '',
+            direction: selectedDirection || customDirection,
+            eventId: currentEventId,
+            stepIndex: currentStepIndex,
+          },
+        );
+        const targetId = chapter.chapter.id;
+        setChapters((current) => [...current, chapter.chapter]);
+        setChapterId(targetId);
+
+        const result = await generation.start({
+          novelId,
+          chapterId: targetId,
+          taskType: 'chapter',
+          direction: selectedDirection || customDirection,
+          instruction: additionalInstruction,
+          eventId: currentEventId,
+          stepIndex: currentStepIndex,
+          // 连续生成时进度由下面统一推进，不让单次生成各自改动
+          autoAdvanceEvent: false,
+          autoExtractSettings: false,
+        });
+
+        if (result.error) break;
+
+        const produced = result.text.trim();
+        if (!produced) {
+          toast.error(t('workbench.planEmptyChapter'));
+          break;
+        }
+
+        await persistChapterOutput(targetId, produced);
+        setPlanProgress({ done: index + 1, total });
+
+        /*
+         * 推进事件进度并取回最新状态。
+         *
+         * 这一步决定下一章写的是第几步；不推进的话每章都会重写同一个步骤。
+         */
+        const stepStatus = parseStepStatus(produced);
+        if (stepStatus.value === 'done') {
+          const advanced = await api.patch<{ event: StoryEvent }>(
+            novelResourcePath(novelId, 'story-events', currentEventId),
+            { advance: 1 },
+          );
+          setCurrentEvent(advanced.event);
+          currentStepIndex = advanced.event.progress;
+          if (advanced.event.progress >= advanced.event.steps.length) {
+            toast.success(t('workbench.planEventDone'));
+            break;
+          }
+        }
+        // 未完成当前步骤时不推进，下一章接着写同一步
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('common.generateFailed'));
+    } finally {
+      setPlanProgress(null);
+      await load();
+    }
+  };
+
+  const stopPlan = () => {
+    planAbortRef.current = true;
+    generation.pause();
   };
 
   const saveToChapter = async () => {
@@ -1068,8 +1192,68 @@ export function WorkbenchClient({ novelId }: { novelId: string }) {
                   </Button>
                 </div>
 
+                {/*
+                  计划性生成：一次指定要写到第几章，逐章串行推进。
+                  每章结束后立即落库，再取回最新进度决定下一章写哪一步。
+                */}
+                <div className="flex flex-wrap items-end gap-3 rounded-[6px] border border-line-soft bg-surface-sunken px-3 py-2.5">
+                  <Field label={t('workbench.planCount')} hint={t('workbench.planHint')}>
+                    <TextInput
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={String(planCount)}
+                      onChange={(event) =>
+                        setPlanCount(Math.max(1, Math.min(50, Number(event.target.value) || 1)))
+                      }
+                      className="w-24"
+                    />
+                  </Field>
+                  {planProgress ? (
+                    <>
+                      <span className="chip chip-accent">
+                        {t('workbench.planProgress')} {planProgress.done}/{planProgress.total}
+                      </span>
+                      <Button variant="danger" onClick={stopPlan}>
+                        <i className="fa-solid fa-stop" aria-hidden />
+                        {t('workbench.planStop')}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      onClick={() => void generatePlan()}
+                      disabled={generation.status === 'running' || !activeEvent}
+                    >
+                      <i className="fa-solid fa-forward-fast" aria-hidden />
+                      {t('workbench.planStart')}
+                    </Button>
+                  )}
+                </div>
+
                 {generation.message ? (
                   <p className="text-xs text-accent-strong">{generation.message}</p>
+                ) : null}
+
+                {/*
+                  推理模型的思考过程。
+                  与正文分开呈现：正文只放成品内容，思考过程收在可折叠区里，
+                  让用户能看清模型确实在工作，而不是对着空白等待。
+                */}
+                {generation.reasoning ? (
+                  <details className="rounded-[6px] border border-line-soft bg-surface-sunken px-3 py-2">
+                    <summary className="cursor-pointer text-[0.7rem] font-semibold text-ink-muted">
+                      {t('workbench.reasoningTitle')}
+                    </summary>
+                    <pre className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-[0.68rem] leading-relaxed text-ink-faint">
+                      {generation.reasoning}
+                    </pre>
+                  </details>
+                ) : null}
+
+                {generation.truncated ? (
+                  <p className="rounded-[6px] border border-warn-border bg-warn-soft px-3 py-2 text-xs leading-relaxed text-warn">
+                    {generation.truncated}
+                  </p>
                 ) : null}
 
                 <div className="card max-h-[40rem] min-h-[16rem] overflow-y-auto px-5 py-4">

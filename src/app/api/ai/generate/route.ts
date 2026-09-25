@@ -321,6 +321,8 @@ export async function POST(request: Request): Promise<Response> {
 
       // 客户端中断时用于保存已生成的内容
       let accumulated = parsed.resumeFrom ?? '';
+      /** 上游给出的结束原因，`length` 表示撞上限被截断 */
+      let finishReason: string | undefined;
       const abortController = new AbortController();
       request.signal.addEventListener('abort', () => abortController.abort());
 
@@ -335,6 +337,8 @@ export async function POST(request: Request): Promise<Response> {
 
       let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0, estimated: true };
       let failed = false;
+      /** 本次是否收到过推理增量，决定出错时如何措辞 */
+      let sawReasoning = false;
 
       try {
         for await (const chunk of chatStream({
@@ -354,15 +358,21 @@ export async function POST(request: Request): Promise<Response> {
           if (chunk.type === 'delta') {
             accumulated += chunk.text;
             send('delta', { text: chunk.text });
+          } else if (chunk.type === 'reasoning') {
+            // 思考过程单独成事件，界面据此显示「模型正在思考」，不混进正文
+            sawReasoning = true;
+            send('reasoning', { text: chunk.text });
           } else if (chunk.type === 'usage') {
             usage = chunk.usage;
           } else if (chunk.type === 'error') {
             failed = true;
+            console.error(`[生成失败] run=${runId} ${chunk.message}`);
             updateRun(runId, { status: 'failed', partialText: accumulated, error: chunk.message });
             send('error', { message: chunk.message });
           } else if (chunk.type === 'done') {
             usage = chunk.usage;
             accumulated = chunk.text || accumulated;
+            if (chunk.finishReason) finishReason = chunk.finishReason;
           }
         }
       } catch (error) {
@@ -401,13 +411,47 @@ export async function POST(request: Request): Promise<Response> {
         status: failed ? 'failed' : 'done',
         partialText: accumulated,
         // 用量一并落库，请求日志里才能看到本次消耗
-        usageJson: JSON.stringify({ ...usage, durationMs }),
+        usageJson: JSON.stringify({ ...usage, durationMs, finishReason }),
       });
+
+      /*
+       * 把模型本次返回的原始内容打到服务端控制台。
+       *
+       * 这类问题排查时最缺的就是「模型到底返回了什么」，
+       * 光看界面上的空白无法区分是模型没写、被截断，还是解析丢掉了。
+       */
+      console.log(
+        [
+          '',
+          `════════ AI 返回 run=${runId} ════════`,
+          `任务：${taskType}　模型：${parsed.model || provider.defaultModel}`,
+          `结束原因：${finishReason ?? '未提供'}　推理增量：${sawReasoning ? '有' : '无'}`,
+          `用量：prompt ${usage.promptTokens} / completion ${usage.completionTokens} / 合计 ${usage.totalTokens}（${durationMs}ms）`,
+          `正文字符数：${accumulated.length}`,
+          '──────── 内容开始 ────────',
+          accumulated || '（空）',
+          '──────── 内容结束 ────────',
+          '',
+        ].join('\n'),
+      );
 
       if (failed) {
         send('done', { runId, length: accumulated.length, durationMs });
         controller.close();
         return;
+      }
+
+      /*
+       * 撞到输出上限被截断时必须明确报错。
+       *
+       * 先前这种情况会照常走完流程并标记完成，界面显示「生成完成」而正文是半截的，
+       * 用户既不知道发生了什么，也已经付掉了那部分 token。
+       */
+      if (finishReason === 'length') {
+        const note = accumulated.trim()
+          ? '本章内容超出单次输出上限，已被截断。已生成的部分照常保存，可在此基础上继续生成。'
+          : '模型未能在输出上限内完成本章，未产出任何正文。请调高最大输出长度或改用更精简的上下文。';
+        send('truncated', { message: note, length: accumulated.length });
       }
 
       // 剥离模型提出的查询与调阅标记，正文只保留成品内容

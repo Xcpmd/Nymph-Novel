@@ -10,6 +10,7 @@ import {
   readChapterContent,
   writeChapterContent,
 } from '../store/chapter-files';
+import { deleteNovelCover, hasNovelCover, writeNovelCover } from '../store/cover';
 import { ensureSetupDir } from '../store/setup-files';
 import type {
   Chapter,
@@ -81,7 +82,12 @@ function mapNovel(row: NovelRow): Novel {
     genre: row.genre,
     summary: row.summary,
     coverEmoji: row.cover_emoji,
-    coverImage: row.cover_image ?? '',
+    /*
+     * 封面只回一个地址，图片本身存在小说目录下的 cover.png。
+     * 早先把 base64 整串放在这个字段里，单行就占掉八十多万字节，
+     * 徒然把库撑大，也让小说没法作为目录整体搬走。
+     */
+    coverImage: hasNovelCover(row.id) ? `/api/novels/${row.id}/cover` : '',
     coverFit: (row.cover_fit ?? 'cover') as CoverFit,
     status: row.status as NovelStatus,
     wordCount: row.word_count,
@@ -183,7 +189,8 @@ export function createNovel(input: CreateNovelInput): Novel {
         input.genre?.trim() ?? '',
         input.summary?.trim() ?? '',
         input.coverEmoji ?? '📖',
-        input.coverImage ?? '',
+        // 图片不写进这个字段，建完小说后单独落成文件
+        '',
         timestamp,
         timestamp,
       );
@@ -209,6 +216,8 @@ export function createNovel(input: CreateNovelInput): Novel {
 
   ensureNovelSkeleton(id, 1);
   ensureSetupDir(id);
+  // 建目录之后再写封面，否则文件没有落脚的地方
+  if (input.coverImage) writeNovelCover(id, input.coverImage);
   return getNovel(id)!;
 }
 
@@ -226,7 +235,14 @@ export function updateNovel(novelId: string, patch: Partial<Novel>): Novel | nul
   if (patch.genre !== undefined) assign('genre', patch.genre);
   if (patch.summary !== undefined) assign('summary', patch.summary);
   if (patch.coverEmoji !== undefined) assign('cover_emoji', patch.coverEmoji);
-  if (patch.coverImage !== undefined) assign('cover_image', patch.coverImage);
+  /*
+   * 封面的处理分三种：传入图片则落成文件，传入空串则删除文件，
+   * 两者都不写数据库 —— 图片内容不再进库，字段留空。
+   */
+  if (patch.coverImage !== undefined) {
+    if (patch.coverImage.trim() === '') deleteNovelCover(novelId);
+    else writeNovelCover(novelId, patch.coverImage);
+  }
   if (patch.coverFit !== undefined) assign('cover_fit', patch.coverFit);
   if (patch.status !== undefined) assign('status', patch.status);
 
